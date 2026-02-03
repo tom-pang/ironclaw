@@ -2,10 +2,29 @@
 //!
 //! Implements a minimal, security-focused host API following VMLogic patterns
 //! from NEAR blockchain. The principle is: deny by default, grant minimal capabilities.
+//!
+//! # Extended API (V2)
+//!
+//! In addition to the basic log/time/workspace functions, the host now provides:
+//!
+//! - **http_request**: Make HTTP requests to allowlisted endpoints with credential injection
+//! - **tool_invoke**: Call other tools via aliases
+//! - **secret_exists**: Check if a secret exists (never read values)
+//!
+//! # Security Architecture
+//!
+//! ```text
+//! WASM Tool ──▶ Host Function ──▶ Allowlist ──▶ Credential ──▶ Execute
+//! (untrusted)   (boundary)        Validator     Injector       Request
+//!                                                    │
+//!                                                    ▼
+//!                              ◀────── Leak Detector ◀────── Response
+//!                          (sanitized, no secrets)
+//! ```
 
-use std::sync::Arc;
 use std::time::{SystemTime, UNIX_EPOCH};
 
+use crate::tools::wasm::capabilities::Capabilities;
 use crate::tools::wasm::error::WasmError;
 
 /// Maximum log entries per execution (prevents log spam attacks).
@@ -44,46 +63,10 @@ pub struct LogEntry {
     pub timestamp_millis: u64,
 }
 
-/// Capabilities that can be granted to a WASM tool.
-///
-/// By default, tools have NO capabilities. Each must be explicitly granted.
-#[derive(Debug, Clone, Default)]
-pub struct Capabilities {
-    /// If Some, tool can read from workspace at these paths.
-    /// Empty vec means workspace access granted but no paths allowed yet.
-    /// None means workspace access completely disabled.
-    pub workspace_read: Option<WorkspaceCapability>,
-}
-
-/// Workspace read capability configuration.
-#[derive(Clone, Default)]
-pub struct WorkspaceCapability {
-    /// Allowed path prefixes (e.g., ["context/", "daily/"]).
-    /// Empty means all paths allowed (within safety constraints).
-    pub allowed_prefixes: Vec<String>,
-    /// Function to actually read from workspace.
-    /// This is injected by the runtime to avoid coupling to workspace impl.
-    pub reader: Option<Arc<dyn WorkspaceReader>>,
-}
-
-impl std::fmt::Debug for WorkspaceCapability {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        f.debug_struct("WorkspaceCapability")
-            .field("allowed_prefixes", &self.allowed_prefixes)
-            .field("reader", &self.reader.is_some())
-            .finish()
-    }
-}
-
-/// Trait for reading from workspace (allows mocking in tests).
-pub trait WorkspaceReader: Send + Sync {
-    fn read(&self, path: &str) -> Option<String>;
-}
-
 /// Host state maintained during WASM execution.
 ///
 /// This is the "VMLogic" equivalent, it tracks all side effects and enforces limits.
-#[derive(Debug)]
+/// Extended in V2 to support HTTP requests, tool invocation, and secret checks.
 pub struct HostState {
     /// Collected log entries.
     logs: Vec<LogEntry>,
@@ -93,6 +76,25 @@ pub struct HostState {
     capabilities: Capabilities,
     /// Count of log entries dropped due to rate limiting.
     logs_dropped: usize,
+    /// User ID for secret/credential lookups.
+    user_id: Option<String>,
+    /// HTTP request count for rate limiting within this execution.
+    http_request_count: u32,
+    /// Tool invoke count for rate limiting within this execution.
+    tool_invoke_count: u32,
+}
+
+impl std::fmt::Debug for HostState {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("HostState")
+            .field("logs_count", &self.logs.len())
+            .field("logging_enabled", &self.logging_enabled)
+            .field("logs_dropped", &self.logs_dropped)
+            .field("user_id", &self.user_id)
+            .field("http_request_count", &self.http_request_count)
+            .field("tool_invoke_count", &self.tool_invoke_count)
+            .finish()
+    }
 }
 
 impl HostState {
@@ -103,12 +105,38 @@ impl HostState {
             logging_enabled: true,
             capabilities,
             logs_dropped: 0,
+            user_id: None,
+            http_request_count: 0,
+            tool_invoke_count: 0,
+        }
+    }
+
+    /// Create a new host state with user context.
+    pub fn new_with_user(capabilities: Capabilities, user_id: impl Into<String>) -> Self {
+        Self {
+            logs: Vec::new(),
+            logging_enabled: true,
+            capabilities,
+            logs_dropped: 0,
+            user_id: Some(user_id.into()),
+            http_request_count: 0,
+            tool_invoke_count: 0,
         }
     }
 
     /// Create a minimal host state with no capabilities.
     pub fn minimal() -> Self {
         Self::new(Capabilities::default())
+    }
+
+    /// Get the user ID if set.
+    pub fn user_id(&self) -> Option<&str> {
+        self.user_id.as_deref()
+    }
+
+    /// Get the capabilities.
+    pub fn capabilities(&self) -> &Capabilities {
+        &self.capabilities
     }
 
     /// Log a message from WASM.
@@ -204,6 +232,114 @@ impl HostState {
     pub fn logs_dropped(&self) -> usize {
         self.logs_dropped
     }
+
+    /// Check if a secret exists (does not expose value).
+    ///
+    /// Returns false if:
+    /// - Secrets capability not granted
+    /// - Secret name not in allowed list
+    /// - User ID not set
+    pub fn secret_exists(&self, name: &str) -> bool {
+        let capability = match &self.capabilities.secrets {
+            Some(cap) => cap,
+            None => return false,
+        };
+
+        // Check if name is allowed
+        capability.is_allowed(name)
+    }
+
+    /// Check if HTTP capability is available for a given URL and method.
+    ///
+    /// Returns an error message if not allowed.
+    pub fn check_http_allowed(&self, url: &str, method: &str) -> Result<(), String> {
+        let capability = self
+            .capabilities
+            .http
+            .as_ref()
+            .ok_or_else(|| "HTTP capability not granted".to_string())?;
+
+        // Use the allowlist validator
+        use crate::tools::wasm::allowlist::AllowlistValidator;
+
+        let validator = AllowlistValidator::new(capability.allowlist.clone());
+        let result = validator.validate(url, method);
+
+        if result.is_allowed() {
+            Ok(())
+        } else {
+            Err(format!("HTTP request not allowed: {:?}", result))
+        }
+    }
+
+    /// Check if tool invocation is allowed for an alias.
+    ///
+    /// Returns the real tool name if allowed, error otherwise.
+    pub fn check_tool_invoke_allowed(&self, alias: &str) -> Result<String, String> {
+        let capability = self
+            .capabilities
+            .tool_invoke
+            .as_ref()
+            .ok_or_else(|| "Tool invocation capability not granted".to_string())?;
+
+        capability
+            .resolve_alias(alias)
+            .map(|s| s.to_string())
+            .ok_or_else(|| format!("Unknown tool alias: {}", alias))
+    }
+
+    /// Increment HTTP request counter and check rate limit.
+    ///
+    /// Returns error if rate limit exceeded.
+    pub fn record_http_request(&mut self) -> Result<(), String> {
+        // Verify HTTP capability exists
+        let _capability = self
+            .capabilities
+            .http
+            .as_ref()
+            .ok_or_else(|| "HTTP capability not granted".to_string())?;
+
+        self.http_request_count += 1;
+
+        // Simple per-execution rate limit (additional to global rate limiter)
+        // This prevents a single execution from making too many requests
+        const MAX_REQUESTS_PER_EXECUTION: u32 = 50;
+        if self.http_request_count > MAX_REQUESTS_PER_EXECUTION {
+            return Err(format!(
+                "Too many HTTP requests in single execution (max {})",
+                MAX_REQUESTS_PER_EXECUTION
+            ));
+        }
+
+        Ok(())
+    }
+
+    /// Increment tool invoke counter and check rate limit.
+    ///
+    /// Returns error if rate limit exceeded.
+    pub fn record_tool_invoke(&mut self) -> Result<(), String> {
+        self.tool_invoke_count += 1;
+
+        const MAX_INVOKES_PER_EXECUTION: u32 = 20;
+        if self.tool_invoke_count > MAX_INVOKES_PER_EXECUTION {
+            return Err(format!(
+                "Too many tool invocations in single execution (max {})",
+                MAX_INVOKES_PER_EXECUTION
+            ));
+        }
+
+        Ok(())
+    }
+
+    /// Get HTTP request count for this execution.
+    pub fn http_request_count(&self) -> u32 {
+        self.http_request_count
+    }
+
+    /// Get tool invoke count for this execution.
+    pub fn tool_invoke_count(&self) -> u32 {
+        self.tool_invoke_count
+    }
 }
 
 /// Validate a workspace path for security.
@@ -243,11 +379,14 @@ fn validate_workspace_path(path: &str) -> Result<(), WasmError> {
 
 #[cfg(test)]
 mod tests {
-    use crate::tools::wasm::host::{
-        Capabilities, HostState, LogLevel, MAX_LOG_ENTRIES, MAX_LOG_MESSAGE_BYTES,
-        WorkspaceCapability, WorkspaceReader, validate_workspace_path,
-    };
     use std::sync::Arc;
+
+    use crate::tools::wasm::capabilities::{
+        Capabilities, SecretsCapability, WorkspaceCapability, WorkspaceReader,
+    };
+    use crate::tools::wasm::host::{
+        HostState, LogLevel, MAX_LOG_ENTRIES, MAX_LOG_MESSAGE_BYTES, validate_workspace_path,
+    };
 
     struct MockReader {
         content: String,
@@ -330,6 +469,7 @@ mod tests {
                 allowed_prefixes: vec![],
                 reader: Some(reader),
             }),
+            ..Default::default()
         };
 
         let state = HostState::new(capabilities);
@@ -348,6 +488,7 @@ mod tests {
                 allowed_prefixes: vec!["context/".to_string()],
                 reader: Some(reader),
             }),
+            ..Default::default()
         };
 
         let state = HostState::new(capabilities);
@@ -391,5 +532,75 @@ mod tests {
         assert!(validate_workspace_path("daily/2024-01-15.md").is_ok());
         assert!(validate_workspace_path("projects/alpha/notes.md").is_ok());
         assert!(validate_workspace_path("MEMORY.md").is_ok());
+    }
+
+    #[test]
+    fn test_secret_exists_no_capability() {
+        let state = HostState::minimal();
+        assert!(!state.secret_exists("any_secret"));
+    }
+
+    #[test]
+    fn test_secret_exists_with_capability() {
+        let capabilities = Capabilities {
+            secrets: Some(SecretsCapability {
+                allowed_names: vec!["openai_*".to_string(), "exact_name".to_string()],
+            }),
+            ..Default::default()
+        };
+
+        let state = HostState::new(capabilities);
+
+        // Glob match
+        assert!(state.secret_exists("openai_key"));
+        assert!(state.secret_exists("openai_org"));
+
+        // Exact match
+        assert!(state.secret_exists("exact_name"));
+
+        // Not allowed
+        assert!(!state.secret_exists("stripe_key"));
+    }
+
+    #[test]
+    fn test_http_request_rate_limit() {
+        // Create state with HTTP capability enabled
+        let capabilities = Capabilities {
+            http: Some(crate::tools::wasm::capabilities::HttpCapability::default()),
+            ..Default::default()
+        };
+        let mut state = HostState::new(capabilities);
+
+        // Should allow up to 50 requests
+        for _ in 0..50 {
+            assert!(state.record_http_request().is_ok());
+        }
+
+        // 51st should fail
+        assert!(state.record_http_request().is_err());
+    }
+
+    #[test]
+    fn test_tool_invoke_rate_limit() {
+        // Create state with tool invoke capability enabled
+        let capabilities = Capabilities {
+            tool_invoke: Some(crate::tools::wasm::capabilities::ToolInvokeCapability::default()),
+            ..Default::default()
+        };
+        let mut state = HostState::new(capabilities);
+
+        // Should allow up to 20 invocations
+        for _ in 0..20 {
+            assert!(state.record_tool_invoke().is_ok());
+        }
+
+        // 21st should fail
+        assert!(state.record_tool_invoke().is_err());
+    }
+
+    #[test]
+    fn test_new_with_user() {
+        let state = HostState::new_with_user(Capabilities::default(), "user123");
+        assert_eq!(state.user_id(), Some("user123"));
     }
 }

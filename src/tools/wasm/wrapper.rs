@@ -12,8 +12,9 @@ use wasmtime::component::{Component, Linker, Val};
 
 use crate::context::JobContext;
 use crate::tools::tool::{Tool, ToolError, ToolOutput};
+use crate::tools::wasm::capabilities::Capabilities;
 use crate::tools::wasm::error::WasmError;
-use crate::tools::wasm::host::{Capabilities, HostState, LogLevel};
+use crate::tools::wasm::host::{HostState, LogLevel};
 use crate::tools::wasm::limits::{ResourceLimits, WasmResourceLimiter};
 use crate::tools::wasm::runtime::{PreparedModule, WasmToolRuntime};
 
@@ -380,9 +381,10 @@ impl std::fmt::Debug for WasmToolWrapper {
 
 #[cfg(test)]
 mod tests {
-    use crate::tools::wasm::host::Capabilities;
-    use crate::tools::wasm::runtime::{WasmRuntimeConfig, WasmToolRuntime};
     use std::sync::Arc;
+
+    use crate::tools::wasm::capabilities::Capabilities;
+    use crate::tools::wasm::runtime::{WasmRuntimeConfig, WasmToolRuntime};
 
     #[test]
     fn test_wrapper_creation() {
@@ -399,5 +401,8 @@ mod tests {
     fn test_capabilities_default() {
         let caps = Capabilities::default();
         assert!(caps.workspace_read.is_none());
+        assert!(caps.http.is_none());
+        assert!(caps.tool_invoke.is_none());
+        assert!(caps.secrets.is_none());
     }
 }

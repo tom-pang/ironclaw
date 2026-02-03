@@ -48,6 +48,7 @@ pub mod evaluation;
 pub mod history;
 pub mod llm;
 pub mod safety;
+pub mod secrets;
 pub mod tools;
 pub mod workspace;
 

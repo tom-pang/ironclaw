@@ -9,7 +9,8 @@ use crate::llm::ToolDefinition;
 use crate::tools::builtin::{EchoTool, HttpTool, JsonTool, TimeTool};
 use crate::tools::tool::Tool;
 use crate::tools::wasm::{
-    Capabilities, ResourceLimits, WasmError, WasmToolRuntime, WasmToolWrapper,
+    Capabilities, ResourceLimits, WasmError, WasmStorageError, WasmToolRuntime, WasmToolStore,
+    WasmToolWrapper,
 };
 
 /// Registry of available tools.
@@ -152,6 +153,77 @@ impl ToolRegistry {
         tracing::info!(name = reg.name, "Registered WASM tool");
         Ok(())
     }
+
+    /// Register a WASM tool from database storage.
+    ///
+    /// Loads the WASM binary with integrity verification and configures capabilities.
+    ///
+    /// # Example
+    ///
+    /// ```ignore
+    /// let store = PostgresWasmToolStore::new(pool);
+    /// let runtime = Arc::new(WasmToolRuntime::new(WasmRuntimeConfig::default())?);
+    ///
+    /// registry.register_wasm_from_storage(
+    ///     &store,
+    ///     &runtime,
+    ///     "user_123",
+    ///     "my_tool",
+    /// ).await?;
+    /// ```
+    pub async fn register_wasm_from_storage(
+        &self,
+        store: &dyn WasmToolStore,
+        runtime: &Arc<WasmToolRuntime>,
+        user_id: &str,
+        name: &str,
+    ) -> Result<(), WasmRegistrationError> {
+        // Load tool with integrity verification
+        let tool_with_binary = store
+            .get_with_binary(user_id, name)
+            .await
+            .map_err(WasmRegistrationError::Storage)?;
+
+        // Load capabilities
+        let stored_caps = store
+            .get_capabilities(tool_with_binary.tool.id)
+            .await
+            .map_err(WasmRegistrationError::Storage)?;
+
+        let capabilities = stored_caps.map(|c| c.to_capabilities()).unwrap_or_default();
+
+        // Register the tool
+        self.register_wasm(WasmToolRegistration {
+            name: &tool_with_binary.tool.name,
+            wasm_bytes: &tool_with_binary.wasm_binary,
+            runtime,
+            capabilities,
+            limits: None,
+            description: Some(&tool_with_binary.tool.description),
+            schema: Some(tool_with_binary.tool.parameters_schema.clone()),
+        })
+        .await
+        .map_err(WasmRegistrationError::Wasm)?;
+
+        tracing::info!(
+            name = tool_with_binary.tool.name,
+            user_id = user_id,
+            trust_level = %tool_with_binary.tool.trust_level,
+            "Registered WASM tool from storage"
+        );
+
+        Ok(())
+    }
+}
+
+/// Error when registering a WASM tool from storage.
+#[derive(Debug, thiserror::Error)]
+pub enum WasmRegistrationError {
+    #[error("Storage error: {0}")]
+    Storage(#[from] WasmStorageError),
+
+    #[error("WASM error: {0}")]
+    Wasm(#[from] WasmError),
 }
 
 /// Configuration for registering a WASM tool.

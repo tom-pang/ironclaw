@@ -2,6 +2,12 @@
 //
 // Defines the contract between sandboxed tools and the host runtime.
 // Tools export the `tool` interface; the host provides the `host` interface.
+//
+// Security Model:
+// - WASM tools are untrusted and run in a sandbox
+// - All capabilities are opt-in (default: no access)
+// - Secrets are NEVER exposed to WASM; credentials are injected at host boundary
+// - All outputs are scanned for secret leakage before returning to WASM
 
 package near:agent;
 
@@ -33,6 +39,65 @@ interface host {
     /// Path must be relative (no leading /) and cannot contain "..".
     /// Returns None if the file doesn't exist or capability not granted.
     workspace-read: func(path: string) -> option<string>;
+
+    // ==================== HTTP Capability ====================
+
+    /// Response from an HTTP request.
+    record http-response {
+        /// HTTP status code.
+        status: u16,
+        /// Response headers as JSON object string.
+        headers-json: string,
+        /// Response body bytes.
+        body: list<u8>,
+    }
+
+    /// Make an HTTP request (if capability granted).
+    ///
+    /// Security:
+    /// - Only allowed endpoints (host/path patterns) can be accessed
+    /// - Credentials are injected by the host; WASM never sees them
+    /// - Response is scanned for leaked secrets before returning
+    /// - Rate-limited per tool
+    ///
+    /// Returns Err with error message if:
+    /// - Endpoint not in allowlist
+    /// - Rate limit exceeded
+    /// - Request/response size limit exceeded
+    /// - Network error
+    /// - Timeout
+    /// - Secret leak detected in response
+    http-request: func(
+        method: string,
+        url: string,
+        headers-json: string,
+        body: option<list<u8>>
+    ) -> result<http-response, string>;
+
+    // ==================== Tool Invocation Capability ====================
+
+    /// Invoke another tool by alias (if capability granted).
+    ///
+    /// Security:
+    /// - WASM calls tools by alias, not real name (indirection layer)
+    /// - Only aliased tools can be invoked
+    /// - Rate-limited per tool
+    /// - Output is scanned for leaked secrets before returning
+    ///
+    /// Returns the tool output as JSON string, or Err with error message.
+    tool-invoke: func(alias: string, params-json: string) -> result<string, string>;
+
+    // ==================== Secrets Capability ====================
+
+    /// Check if a secret exists (if capability granted).
+    ///
+    /// Security:
+    /// - WASM can only check existence, NEVER read values
+    /// - Only allowed secret names can be checked
+    /// - Actual credentials are injected by host during HTTP requests
+    ///
+    /// Returns true if the secret exists and is accessible to this tool.
+    secret-exists: func(name: string) -> bool;
 }
 
 /// Tool interface that sandboxed tools must implement.

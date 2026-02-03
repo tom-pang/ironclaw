@@ -67,6 +67,13 @@ pgvector = { version = "0.4", features = ["postgres"] }
 # WASM sandbox for untrusted tool execution
 wasmtime = { version = "28", features = ["component-model"] }
 
+# Cryptography for secrets management
+aes-gcm = "0.10"
+hkdf = "0.12"
+sha2 = "0.10"
+blake3 = "1"
+rand = "0.8"
+
 [dev-dependencies]
 tokio-test = "0.4"
 testcontainers-modules = { version = "0.11", features = ["postgres"] }

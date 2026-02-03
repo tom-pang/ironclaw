@@ -16,6 +16,7 @@ pub struct Config {
     pub agent: AgentConfig,
     pub safety: SafetyConfig,
     pub wasm: WasmConfig,
+    pub secrets: SecretsConfig,
 }
 
 impl Config {
@@ -31,6 +32,7 @@ impl Config {
             agent: AgentConfig::from_env()?,
             safety: SafetyConfig::from_env()?,
             wasm: WasmConfig::from_env()?,
+            secrets: SecretsConfig::from_env()?,
         })
     }
 }
@@ -248,6 +250,52 @@ pub struct WasmConfig {
     pub cache_compiled: bool,
     /// Directory for compiled module cache.
     pub cache_dir: Option<PathBuf>,
+}
+
+/// Secrets management configuration.
+#[derive(Clone, Default)]
+pub struct SecretsConfig {
+    /// Master key for encrypting secrets (loaded from SECRETS_MASTER_KEY env var).
+    /// Must be at least 32 bytes for AES-256-GCM.
+    pub master_key: Option<SecretString>,
+    /// Whether secrets management is enabled.
+    pub enabled: bool,
+}
+
+impl std::fmt::Debug for SecretsConfig {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("SecretsConfig")
+            .field("master_key", &self.master_key.is_some())
+            .field("enabled", &self.enabled)
+            .finish()
+    }
+}
+
+impl SecretsConfig {
+    fn from_env() -> Result<Self, ConfigError> {
+        let master_key = optional_env("SECRETS_MASTER_KEY")?.map(SecretString::from);
+        let enabled = master_key.is_some();
+
+        // Validate master key length if provided
+        if let Some(ref key) = master_key {
+            if key.expose_secret().len() < 32 {
+                return Err(ConfigError::InvalidValue {
+                    key: "SECRETS_MASTER_KEY".to_string(),
+                    message: "must be at least 32 bytes for AES-256-GCM".to_string(),
+                });
+            }
+        }
+
+        Ok(Self {
+            master_key,
+            enabled,
+        })
+    }
+
+    /// Get the master key if configured.
+    pub fn master_key(&self) -> Option<&SecretString> {
+        self.master_key.as_ref()
+    }
 }
 
 impl Default for WasmConfig {

@@ -5,11 +5,17 @@
 //! - Sanitizing tool outputs before they reach the LLM
 //! - Validating inputs before processing
 //! - Enforcing safety policies
+//! - Detecting secret leakage in outputs
 
+mod leak_detector;
 mod policy;
 mod sanitizer;
 mod validator;
 
+pub use leak_detector::{
+    LeakAction, LeakDetectionError, LeakDetector, LeakMatch, LeakPattern, LeakScanResult,
+    LeakSeverity,
+};
 pub use policy::{Policy, PolicyRule, Severity};
 pub use sanitizer::{InjectionWarning, SanitizedOutput, Sanitizer};
 pub use validator::{ValidationResult, Validator};

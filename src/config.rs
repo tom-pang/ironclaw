@@ -60,52 +60,10 @@ impl DatabaseConfig {
     }
 }
 
-/// LLM provider configuration.
+/// LLM provider configuration (NEAR AI only).
 #[derive(Debug, Clone)]
 pub struct LlmConfig {
-    pub provider: LlmProvider,
-    pub openai: Option<OpenAiConfig>,
-    pub anthropic: Option<AnthropicConfig>,
-    pub nearai: Option<NearAiConfig>,
-}
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum LlmProvider {
-    OpenAi,
-    Anthropic,
-    NearAi,
-}
-
-impl std::str::FromStr for LlmProvider {
-    type Err = ConfigError;
-
-    fn from_str(s: &str) -> Result<Self, Self::Err> {
-        match s.to_lowercase().as_str() {
-            "openai" => Ok(Self::OpenAi),
-            "anthropic" => Ok(Self::Anthropic),
-            "nearai" | "near-ai" | "near_ai" => Ok(Self::NearAi),
-            _ => Err(ConfigError::InvalidValue {
-                key: "LLM_PROVIDER".to_string(),
-                message: format!(
-                    "unknown provider: {s}, expected 'openai', 'anthropic', or 'nearai'"
-                ),
-            }),
-        }
-    }
-}
-
-#[derive(Debug, Clone)]
-pub struct OpenAiConfig {
-    pub api_key: SecretString,
-    pub model: String,
-    pub base_url: Option<String>,
-}
-
-#[derive(Debug, Clone)]
-pub struct AnthropicConfig {
-    pub api_key: SecretString,
-    pub model: String,
-    pub base_url: Option<String>,
+    pub nearai: NearAiConfig,
 }
 
 /// NEAR AI chat-api configuration.
@@ -121,66 +79,16 @@ pub struct NearAiConfig {
 
 impl LlmConfig {
     fn from_env() -> Result<Self, ConfigError> {
-        let provider: LlmProvider = optional_env("LLM_PROVIDER")?
-            .map(|s| s.parse())
-            .transpose()?
-            .unwrap_or(LlmProvider::NearAi);
+        let session_token = required_env("NEARAI_SESSION_TOKEN")?;
 
-        let openai = if let Some(api_key) = optional_env("OPENAI_API_KEY")? {
-            Some(OpenAiConfig {
-                api_key: SecretString::from(api_key),
-                model: optional_env("OPENAI_MODEL")?.unwrap_or_else(|| "gpt-4-turbo".to_string()),
-                base_url: optional_env("OPENAI_BASE_URL")?,
-            })
-        } else {
-            None
-        };
-
-        let anthropic = if let Some(api_key) = optional_env("ANTHROPIC_API_KEY")? {
-            Some(AnthropicConfig {
-                api_key: SecretString::from(api_key),
-                model: optional_env("ANTHROPIC_MODEL")?
-                    .unwrap_or_else(|| "claude-3-opus-20240229".to_string()),
-                base_url: optional_env("ANTHROPIC_BASE_URL")?,
-            })
-        } else {
-            None
-        };
-
-        let nearai = if let Some(session_token) = optional_env("NEARAI_SESSION_TOKEN")? {
-            Some(NearAiConfig {
+        Ok(Self {
+            nearai: NearAiConfig {
                 session_token: SecretString::from(session_token),
                 model: optional_env("NEARAI_MODEL")?
                     .unwrap_or_else(|| "claude-3-5-sonnet-20241022".to_string()),
                 base_url: optional_env("NEARAI_BASE_URL")?
                     .unwrap_or_else(|| "https://api.near.ai".to_string()),
-            })
-        } else {
-            None
-        };
-
-        // Validate that the selected provider has configuration
-        match provider {
-            LlmProvider::OpenAi if openai.is_none() => {
-                return Err(ConfigError::MissingEnvVar("OPENAI_API_KEY".to_string()));
-            }
-            LlmProvider::Anthropic if anthropic.is_none() => {
-                return Err(ConfigError::MissingEnvVar("ANTHROPIC_API_KEY".to_string()));
-            }
-            LlmProvider::NearAi if nearai.is_none() => {
-                return Err(ConfigError::MissingEnvVar(
-                    "NEARAI_SESSION_TOKEN".to_string(),
-                ));
-            }
-            // Provider has valid configuration
-            LlmProvider::OpenAi | LlmProvider::Anthropic | LlmProvider::NearAi => {}
-        }
-
-        Ok(Self {
-            provider,
-            openai,
-            anthropic,
-            nearai,
+            },
         })
     }
 }
@@ -353,38 +261,4 @@ where
         })
         .transpose()
         .map(|opt| opt.unwrap_or(default))
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn test_llm_provider_parsing() {
-        assert_eq!(
-            "openai".parse::<LlmProvider>().unwrap(),
-            LlmProvider::OpenAi
-        );
-        assert_eq!(
-            "anthropic".parse::<LlmProvider>().unwrap(),
-            LlmProvider::Anthropic
-        );
-        assert_eq!(
-            "OpenAI".parse::<LlmProvider>().unwrap(),
-            LlmProvider::OpenAi
-        );
-        assert_eq!(
-            "nearai".parse::<LlmProvider>().unwrap(),
-            LlmProvider::NearAi
-        );
-        assert_eq!(
-            "near-ai".parse::<LlmProvider>().unwrap(),
-            LlmProvider::NearAi
-        );
-        assert_eq!(
-            "near_ai".parse::<LlmProvider>().unwrap(),
-            LlmProvider::NearAi
-        );
-        assert!("invalid".parse::<LlmProvider>().is_err());
-    }
 }

@@ -63,5 +63,5 @@ pub mod prelude {
     pub use crate::llm::LlmProvider;
     pub use crate::safety::{SanitizedOutput, Sanitizer};
     pub use crate::tools::{Tool, ToolOutput, ToolRegistry};
-    pub use crate::workspace::{DocType, MemoryDocument, Workspace};
+    pub use crate::workspace::{MemoryDocument, Workspace};
 }

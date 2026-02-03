@@ -53,11 +53,9 @@ src/
 │   ├── validator.rs    # Input validation (length, encoding, patterns)
 │   └── policy.rs       # PolicyRule system with severity/actions
 │
-├── llm/                # LLM integration
+├── llm/                # LLM integration (NEAR AI only)
 │   ├── provider.rs     # LlmProvider trait, message types
-│   ├── nearai.rs       # NEAR AI chat-api (default, unified interface)
-│   ├── openai.rs       # OpenAI API implementation
-│   ├── anthropic.rs    # Anthropic API implementation
+│   ├── nearai.rs       # NEAR AI chat-api implementation
 │   └── reasoning.rs    # Planning, tool selection, evaluation
 │
 ├── tools/              # Extensible tool system
@@ -76,7 +74,7 @@ src/
 │
 ├── workspace/          # Persistent memory system (OpenClaw-inspired)
 │   ├── mod.rs          # Workspace struct, memory operations
-│   ├── document.rs     # DocType enum, MemoryDocument, MemoryChunk
+│   ├── document.rs     # MemoryDocument, MemoryChunk, WorkspaceEntry
 │   ├── chunker.rs      # Document chunking (800 tokens, 15% overlap)
 │   ├── embeddings.rs   # EmbeddingProvider trait, OpenAI implementation
 │   ├── search.rs       # Hybrid search with RRF algorithm
@@ -164,21 +162,10 @@ Environment variables (see `.env.example`):
 ```bash
 DATABASE_URL=postgres://user:pass@localhost/near_agent
 
-# LLM Provider (default: nearai)
-LLM_PROVIDER=nearai  # Options: nearai, openai, anthropic
-
-# NEAR AI (recommended - unified API with user auth)
+# NEAR AI (required)
 NEARAI_SESSION_TOKEN=sess_...
 NEARAI_MODEL=claude-3-5-sonnet-20241022
 NEARAI_BASE_URL=https://api.near.ai
-
-# OpenAI (alternative)
-OPENAI_API_KEY=sk-...
-OPENAI_MODEL=gpt-4-turbo
-
-# Anthropic (alternative)
-ANTHROPIC_API_KEY=sk-ant-...
-ANTHROPIC_MODEL=claude-3-opus-20240229
 
 # Agent settings
 AGENT_NAME=near-agent
@@ -187,7 +174,7 @@ MAX_PARALLEL_JOBS=5
 
 ### NEAR AI Provider
 
-The default provider uses the NEAR AI chat-api (`https://api.near.ai/v1/responses`) which provides:
+Uses the NEAR AI chat-api (`https://api.near.ai/v1/responses`) which provides:
 - Unified access to multiple models (OpenAI, Anthropic, etc.)
 - User authentication via session tokens
 - Usage tracking and billing through NEAR AI
@@ -196,9 +183,9 @@ Session tokens have the format `sess_xxx` (37 characters). They are authenticate
 
 ## Database
 
-Migrations in `migrations/`. Tables:
+Single migration in `migrations/V1__initial.sql`. Tables:
 
-**V1 (initial):**
+**Core:**
 - `conversations` - Multi-channel conversation tracking
 - `agent_jobs` - Job metadata and status
 - `job_actions` - Event-sourced tool executions
@@ -206,8 +193,8 @@ Migrations in `migrations/`. Tables:
 - `llm_calls` - Cost tracking
 - `estimation_snapshots` - Learning data
 
-**V2 (workspace/memory):**
-- `memory_documents` - Full documents (MEMORY.md, daily logs, identity files)
+**Workspace/Memory:**
+- `memory_documents` - Flexible path-based files (e.g., "context/vision.md", "daily/2024-01-15.md")
 - `memory_chunks` - Chunked content with FTS (tsvector) and vector (pgvector) indexes
 - `heartbeat_state` - Periodic execution tracking
 
@@ -292,38 +279,59 @@ RUST_LOG=near_agent=debug,tower_http=debug cargo run
 
 ## Workspace & Memory System
 
-Inspired by [OpenClaw](https://github.com/openclaw/openclaw), the workspace provides persistent memory for agents.
+Inspired by [OpenClaw](https://github.com/openclaw/openclaw), the workspace provides persistent memory for agents with a flexible filesystem-like structure.
 
 ### Key Principles
 
 1. **"Memory is files, not RAM"** - If you want to remember something, write it explicitly
-2. **Two-tier memory** - Daily logs (raw) + curated MEMORY.md (distilled wisdom)
-3. **Hybrid search** - Combines FTS (keyword) + vector (semantic) via Reciprocal Rank Fusion
+2. **Flexible structure** - Create any directory/file hierarchy you need
+3. **Self-documenting** - Use README.md files to describe directory structure
+4. **Hybrid search** - Combines FTS (keyword) + vector (semantic) via Reciprocal Rank Fusion
 
-### Document Types
+### Filesystem Structure
 
-| Type | Purpose | Singleton |
-|------|---------|-----------|
-| `Memory` | Long-term curated facts (MEMORY.md) | Yes |
-| `DailyLog` | Append-only daily notes (keyed by date) | No |
-| `Identity` | Agent name, nature, vibe | Yes |
-| `Soul` | Core values and principles | Yes |
-| `Agents` | Behavior instructions | Yes |
-| `User` | User context (name, preferences) | Yes |
-| `Heartbeat` | Periodic checklist | Yes |
+```
+workspace/
+├── README.md              <- Root runbook/index
+├── MEMORY.md              <- Long-term curated memory
+├── HEARTBEAT.md           <- Periodic checklist
+├── IDENTITY.md            <- Agent name, nature, vibe
+├── SOUL.md                <- Core values
+├── AGENTS.md              <- Behavior instructions
+├── USER.md                <- User context
+├── context/               <- Identity-related docs
+│   ├── vision.md
+│   └── priorities.md
+├── daily/                 <- Daily logs
+│   ├── 2024-01-15.md
+│   └── 2024-01-16.md
+├── projects/              <- Arbitrary structure
+│   └── alpha/
+│       ├── README.md
+│       └── notes.md
+└── ...
+```
 
 ### Using the Workspace
 
 ```rust
-use crate::workspace::{Workspace, DocType, OpenAiEmbeddings};
+use crate::workspace::{Workspace, OpenAiEmbeddings, paths};
 
 // Create workspace for a user
 let workspace = Workspace::new("user_123", pool)
     .with_embeddings(Arc::new(OpenAiEmbeddings::new(api_key)));
 
-// Write to memory
+// Read/write any path
+let doc = workspace.read("projects/alpha/notes.md").await?;
+workspace.write("context/priorities.md", "# Priorities\n\n1. Feature X").await?;
+workspace.append("daily/2024-01-15.md", "Completed task X").await?;
+
+// Convenience methods for well-known files
 workspace.append_memory("User prefers dark mode").await?;
-workspace.append_daily_log("Completed task X").await?;
+workspace.append_daily_log("Session note").await?;
+
+// List directory contents
+let entries = workspace.list("projects/").await?;
 
 // Search (hybrid FTS + vector)
 let results = workspace.search("dark mode preference", 5).await?;
@@ -334,11 +342,12 @@ let prompt = workspace.system_prompt().await?;
 
 ### Memory Tools
 
-Three tools for LLM use:
+Four tools for LLM use:
 
 - **`memory_search`** - Hybrid search, MUST be called before answering questions about prior work
-- **`memory_write`** - Write to memory or daily_log target
-- **`memory_read`** - Read specific document by type
+- **`memory_write`** - Write to any path (memory, daily_log, or custom paths)
+- **`memory_read`** - Read any file by path
+- **`memory_list`** - List directory contents
 
 ### Hybrid Search (RRF)
 

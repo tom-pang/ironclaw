@@ -1,99 +1,32 @@
-//! Memory document types.
+//! Memory document types for the workspace.
 
 use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
 use uuid::Uuid;
 
-use crate::error::WorkspaceError;
-
-/// Document type in the workspace.
+/// Well-known document paths.
 ///
-/// Each type represents a different kind of persistent memory:
-/// - **Memory**: Long-term curated facts and decisions (MEMORY.md)
-/// - **DailyLog**: Append-only daily notes (memory/YYYY-MM-DD.md)
-/// - **Identity**: Agent name and personality
-/// - **Soul**: Core values and behavior principles
-/// - **Agents**: Behavior instructions
-/// - **User**: User context (name, preferences)
-/// - **Heartbeat**: Periodic checklist for proactive execution
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
-#[serde(rename_all = "snake_case")]
-pub enum DocType {
-    /// Long-term curated memory (MEMORY.md equivalent).
-    Memory,
-    /// Daily append-only logs.
-    DailyLog,
+/// These are conventional paths that have special meaning in the workspace.
+/// Agents can create arbitrary paths beyond these.
+pub mod paths {
+    /// Long-term curated memory.
+    pub const MEMORY: &str = "MEMORY.md";
     /// Agent identity (name, nature, vibe).
-    Identity,
-    /// Core values and principles (SOUL.md).
-    Soul,
-    /// Behavior instructions (AGENTS.md).
-    Agents,
-    /// User context (USER.md).
-    User,
-    /// Periodic checklist (HEARTBEAT.md).
-    Heartbeat,
-}
-
-impl DocType {
-    /// Get the string representation.
-    pub fn as_str(&self) -> &'static str {
-        match self {
-            DocType::Memory => "memory",
-            DocType::DailyLog => "daily_log",
-            DocType::Identity => "identity",
-            DocType::Soul => "soul",
-            DocType::Agents => "agents",
-            DocType::User => "user",
-            DocType::Heartbeat => "heartbeat",
-        }
-    }
-
-    /// Check if this document type is a singleton (one per user/agent).
-    pub fn is_singleton(&self) -> bool {
-        match self {
-            DocType::Memory
-            | DocType::Identity
-            | DocType::Soul
-            | DocType::Agents
-            | DocType::User
-            | DocType::Heartbeat => true,
-            DocType::DailyLog => false,
-        }
-    }
-
-    /// Check if this document should be included in the system prompt.
-    pub fn is_identity_document(&self) -> bool {
-        matches!(
-            self,
-            DocType::Identity | DocType::Soul | DocType::Agents | DocType::User
-        )
-    }
-}
-
-impl TryFrom<&str> for DocType {
-    type Error = WorkspaceError;
-
-    fn try_from(s: &str) -> Result<Self, Self::Error> {
-        match s {
-            "memory" => Ok(DocType::Memory),
-            "daily_log" => Ok(DocType::DailyLog),
-            "identity" => Ok(DocType::Identity),
-            "soul" => Ok(DocType::Soul),
-            "agents" => Ok(DocType::Agents),
-            "user" => Ok(DocType::User),
-            "heartbeat" => Ok(DocType::Heartbeat),
-            _ => Err(WorkspaceError::InvalidDocType {
-                doc_type: s.to_string(),
-            }),
-        }
-    }
-}
-
-impl std::fmt::Display for DocType {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        write!(f, "{}", self.as_str())
-    }
+    pub const IDENTITY: &str = "IDENTITY.md";
+    /// Core values and principles.
+    pub const SOUL: &str = "SOUL.md";
+    /// Behavior instructions.
+    pub const AGENTS: &str = "AGENTS.md";
+    /// User context (name, preferences).
+    pub const USER: &str = "USER.md";
+    /// Periodic checklist for heartbeat.
+    pub const HEARTBEAT: &str = "HEARTBEAT.md";
+    /// Root runbook/readme.
+    pub const README: &str = "README.md";
+    /// Daily logs directory.
+    pub const DAILY_DIR: &str = "daily/";
+    /// Context directory (for identity-related docs).
+    pub const CONTEXT_DIR: &str = "context/";
 }
 
 /// A memory document stored in the database.
@@ -105,10 +38,8 @@ pub struct MemoryDocument {
     pub user_id: String,
     /// Optional agent ID for multi-agent isolation.
     pub agent_id: Option<Uuid>,
-    /// Document type.
-    pub doc_type: DocType,
-    /// Optional title (e.g., date for daily logs).
-    pub title: Option<String>,
+    /// File path within the workspace (e.g., "context/vision.md").
+    pub path: String,
     /// Full document content.
     pub content: String,
     /// Creation timestamp.
@@ -120,25 +51,34 @@ pub struct MemoryDocument {
 }
 
 impl MemoryDocument {
-    /// Create a new document (not persisted yet).
+    /// Create a new document with a path.
     pub fn new(
         user_id: impl Into<String>,
         agent_id: Option<Uuid>,
-        doc_type: DocType,
-        title: Option<String>,
+        path: impl Into<String>,
     ) -> Self {
         let now = Utc::now();
         Self {
             id: Uuid::new_v4(),
             user_id: user_id.into(),
             agent_id,
-            doc_type,
-            title,
+            path: path.into(),
             content: String::new(),
             created_at: now,
             updated_at: now,
             metadata: serde_json::Value::Object(serde_json::Map::new()),
         }
+    }
+
+    /// Get the file name from the path.
+    pub fn file_name(&self) -> &str {
+        self.path.rsplit('/').next().unwrap_or(&self.path)
+    }
+
+    /// Get the parent directory from the path.
+    pub fn parent_dir(&self) -> Option<&str> {
+        let idx = self.path.rfind('/')?;
+        Some(&self.path[..idx])
     }
 
     /// Check if the document is empty.
@@ -149,6 +89,34 @@ impl MemoryDocument {
     /// Get word count.
     pub fn word_count(&self) -> usize {
         self.content.split_whitespace().count()
+    }
+
+    /// Check if this is a well-known identity document.
+    pub fn is_identity_document(&self) -> bool {
+        matches!(
+            self.path.as_str(),
+            paths::IDENTITY | paths::SOUL | paths::AGENTS | paths::USER
+        )
+    }
+}
+
+/// An entry in a workspace directory listing.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct WorkspaceEntry {
+    /// Path relative to listing directory.
+    pub path: String,
+    /// True if this is a directory (has children).
+    pub is_directory: bool,
+    /// Last update timestamp (latest among children for directories).
+    pub updated_at: Option<DateTime<Utc>>,
+    /// Preview of content (first ~200 chars, None for directories).
+    pub content_preview: Option<String>,
+}
+
+impl WorkspaceEntry {
+    /// Get the entry name (last path component).
+    pub fn name(&self) -> &str {
+        self.path.rsplit('/').next().unwrap_or(&self.path)
     }
 }
 
@@ -194,43 +162,60 @@ mod tests {
     use super::*;
 
     #[test]
-    fn test_doc_type_roundtrip() {
-        for doc_type in [
-            DocType::Memory,
-            DocType::DailyLog,
-            DocType::Identity,
-            DocType::Soul,
-            DocType::Agents,
-            DocType::User,
-            DocType::Heartbeat,
-        ] {
-            let s = doc_type.as_str();
-            let parsed = DocType::try_from(s).unwrap();
-            assert_eq!(parsed, doc_type);
-        }
+    fn test_memory_document_new() {
+        let doc = MemoryDocument::new("user1", None, "context/vision.md");
+        assert_eq!(doc.user_id, "user1");
+        assert_eq!(doc.path, "context/vision.md");
+        assert!(doc.content.is_empty());
     }
 
     #[test]
-    fn test_singleton_types() {
-        assert!(DocType::Memory.is_singleton());
-        assert!(DocType::Heartbeat.is_singleton());
-        assert!(!DocType::DailyLog.is_singleton());
+    fn test_memory_document_file_name() {
+        let doc = MemoryDocument::new("user1", None, "projects/alpha/README.md");
+        assert_eq!(doc.file_name(), "README.md");
     }
 
     #[test]
-    fn test_identity_documents() {
-        assert!(DocType::Soul.is_identity_document());
-        assert!(DocType::Agents.is_identity_document());
-        assert!(!DocType::Memory.is_identity_document());
-        assert!(!DocType::DailyLog.is_identity_document());
+    fn test_memory_document_parent_dir() {
+        let doc = MemoryDocument::new("user1", None, "projects/alpha/README.md");
+        assert_eq!(doc.parent_dir(), Some("projects/alpha"));
+
+        let root_doc = MemoryDocument::new("user1", None, "README.md");
+        assert_eq!(root_doc.parent_dir(), None);
     }
 
     #[test]
     fn test_memory_document_word_count() {
-        let mut doc = MemoryDocument::new("user1", None, DocType::Memory, None);
+        let mut doc = MemoryDocument::new("user1", None, "MEMORY.md");
         assert_eq!(doc.word_count(), 0);
 
         doc.content = "Hello world, this is a test.".to_string();
         assert_eq!(doc.word_count(), 6);
+    }
+
+    #[test]
+    fn test_is_identity_document() {
+        let identity = MemoryDocument::new("user1", None, paths::IDENTITY);
+        assert!(identity.is_identity_document());
+
+        let soul = MemoryDocument::new("user1", None, paths::SOUL);
+        assert!(soul.is_identity_document());
+
+        let memory = MemoryDocument::new("user1", None, paths::MEMORY);
+        assert!(!memory.is_identity_document());
+
+        let custom = MemoryDocument::new("user1", None, "projects/notes.md");
+        assert!(!custom.is_identity_document());
+    }
+
+    #[test]
+    fn test_workspace_entry_name() {
+        let entry = WorkspaceEntry {
+            path: "projects/alpha".to_string(),
+            is_directory: true,
+            updated_at: None,
+            content_preview: None,
+        };
+        assert_eq!(entry.name(), "alpha");
     }
 }

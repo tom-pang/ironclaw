@@ -4,14 +4,14 @@
 //! - Documents in `memory_documents` table
 //! - Chunks in `memory_chunks` table (with FTS and vector indexes)
 
-use chrono::Utc;
+use chrono::{DateTime, Utc};
 use deadpool_postgres::Pool;
 use pgvector::Vector;
 use uuid::Uuid;
 
 use crate::error::WorkspaceError;
 
-use crate::workspace::document::{DocType, MemoryChunk, MemoryDocument};
+use crate::workspace::document::{MemoryChunk, MemoryDocument, WorkspaceEntry};
 use crate::workspace::search::{RankedResult, SearchConfig, SearchResult, reciprocal_rank_fusion};
 
 /// Database repository for workspace operations.
@@ -37,50 +37,34 @@ impl Repository {
 
     // ==================== Document Operations ====================
 
-    /// Get a document by type and optional title.
-    pub async fn get_document(
+    /// Get a document by its path.
+    pub async fn get_document_by_path(
         &self,
         user_id: &str,
         agent_id: Option<Uuid>,
-        doc_type: DocType,
-        title: Option<&str>,
+        path: &str,
     ) -> Result<MemoryDocument, WorkspaceError> {
         let conn = self.conn().await?;
 
-        let row = if let Some(title) = title {
-            conn.query_opt(
+        let row = conn
+            .query_opt(
                 r#"
-                SELECT id, user_id, agent_id, doc_type, title, content,
+                SELECT id, user_id, agent_id, path, content,
                        created_at, updated_at, metadata
                 FROM memory_documents
-                WHERE user_id = $1 AND agent_id IS NOT DISTINCT FROM $2
-                  AND doc_type = $3 AND title = $4
+                WHERE user_id = $1 AND agent_id IS NOT DISTINCT FROM $2 AND path = $3
                 "#,
-                &[&user_id, &agent_id, &doc_type.as_str(), &title],
+                &[&user_id, &agent_id, &path],
             )
             .await
-        } else {
-            conn.query_opt(
-                r#"
-                SELECT id, user_id, agent_id, doc_type, title, content,
-                       created_at, updated_at, metadata
-                FROM memory_documents
-                WHERE user_id = $1 AND agent_id IS NOT DISTINCT FROM $2
-                  AND doc_type = $3 AND title IS NULL
-                "#,
-                &[&user_id, &agent_id, &doc_type.as_str()],
-            )
-            .await
-        };
-
-        let row = row.map_err(|e| WorkspaceError::SearchFailed {
-            reason: format!("Query failed: {}", e),
-        })?;
+            .map_err(|e| WorkspaceError::SearchFailed {
+                reason: format!("Query failed: {}", e),
+            })?;
 
         match row {
-            Some(row) => Ok(self.row_to_document(&row)?),
+            Some(row) => Ok(self.row_to_document(&row)),
             None => Err(WorkspaceError::DocumentNotFound {
-                doc_type: doc_type.to_string(),
+                doc_type: path.to_string(),
                 user_id: user_id.to_string(),
             }),
         }
@@ -93,7 +77,7 @@ impl Repository {
         let row = conn
             .query_opt(
                 r#"
-                SELECT id, user_id, agent_id, doc_type, title, content,
+                SELECT id, user_id, agent_id, path, content,
                        created_at, updated_at, metadata
                 FROM memory_documents WHERE id = $1
                 "#,
@@ -105,7 +89,7 @@ impl Repository {
             })?;
 
         match row {
-            Some(row) => Ok(self.row_to_document(&row)?),
+            Some(row) => Ok(self.row_to_document(&row)),
             None => Err(WorkspaceError::DocumentNotFound {
                 doc_type: "unknown".to_string(),
                 user_id: "unknown".to_string(),
@@ -113,16 +97,15 @@ impl Repository {
         }
     }
 
-    /// Get or create a document.
-    pub async fn get_or_create_document(
+    /// Get or create a document by path.
+    pub async fn get_or_create_document_by_path(
         &self,
         user_id: &str,
         agent_id: Option<Uuid>,
-        doc_type: DocType,
-        title: Option<&str>,
+        path: &str,
     ) -> Result<MemoryDocument, WorkspaceError> {
         // Try to get existing document first
-        match self.get_document(user_id, agent_id, doc_type, title).await {
+        match self.get_document_by_path(user_id, agent_id, path).await {
             Ok(doc) => return Ok(doc),
             Err(WorkspaceError::DocumentNotFound { .. }) => {}
             Err(e) => return Err(e),
@@ -132,14 +115,15 @@ impl Repository {
         let conn = self.conn().await?;
         let id = Uuid::new_v4();
         let now = Utc::now();
+        let metadata = serde_json::json!({});
 
         conn.execute(
             r#"
-            INSERT INTO memory_documents (id, user_id, agent_id, doc_type, title, content, created_at, updated_at)
-            VALUES ($1, $2, $3, $4, $5, '', $6, $7)
-            ON CONFLICT (user_id, agent_id, doc_type, title) DO NOTHING
+            INSERT INTO memory_documents (id, user_id, agent_id, path, content, metadata, created_at, updated_at)
+            VALUES ($1, $2, $3, $4, '', $5, $6, $7)
+            ON CONFLICT (user_id, agent_id, path) DO NOTHING
             "#,
-            &[&id, &user_id, &agent_id, &doc_type.as_str(), &title, &now, &now],
+            &[&id, &user_id, &agent_id, &path, &metadata, &now, &now],
         )
         .await
         .map_err(|e| WorkspaceError::SearchFailed {
@@ -147,7 +131,7 @@ impl Repository {
         })?;
 
         // Fetch the document (might have been created by concurrent request)
-        self.get_document(user_id, agent_id, doc_type, title).await
+        self.get_document_by_path(user_id, agent_id, path).await
     }
 
     /// Update a document's content.
@@ -166,31 +150,108 @@ impl Repository {
         Ok(())
     }
 
-    /// List documents by type.
+    /// Delete a document by its path.
+    pub async fn delete_document_by_path(
+        &self,
+        user_id: &str,
+        agent_id: Option<Uuid>,
+        path: &str,
+    ) -> Result<(), WorkspaceError> {
+        let conn = self.conn().await?;
+
+        // First get the document to delete its chunks
+        let doc = self.get_document_by_path(user_id, agent_id, path).await?;
+        self.delete_chunks(doc.id).await?;
+
+        // Delete the document
+        conn.execute(
+            r#"
+            DELETE FROM memory_documents
+            WHERE user_id = $1 AND agent_id IS NOT DISTINCT FROM $2 AND path = $3
+            "#,
+            &[&user_id, &agent_id, &path],
+        )
+        .await
+        .map_err(|e| WorkspaceError::SearchFailed {
+            reason: format!("Delete failed: {}", e),
+        })?;
+
+        Ok(())
+    }
+
+    /// List files and directories in a directory path.
+    ///
+    /// Returns immediate children (not recursive).
+    /// Empty string lists the root directory.
+    pub async fn list_directory(
+        &self,
+        user_id: &str,
+        agent_id: Option<Uuid>,
+        directory: &str,
+    ) -> Result<Vec<WorkspaceEntry>, WorkspaceError> {
+        let conn = self.conn().await?;
+
+        let rows = conn
+            .query(
+                "SELECT path, is_directory, updated_at, content_preview FROM list_workspace_files($1, $2, $3)",
+                &[&user_id, &agent_id, &directory],
+            )
+            .await
+            .map_err(|e| WorkspaceError::SearchFailed {
+                reason: format!("List directory failed: {}", e),
+            })?;
+
+        Ok(rows
+            .iter()
+            .map(|row| {
+                let updated_at: Option<DateTime<Utc>> = row.get("updated_at");
+                WorkspaceEntry {
+                    path: row.get("path"),
+                    is_directory: row.get("is_directory"),
+                    updated_at,
+                    content_preview: row.get("content_preview"),
+                }
+            })
+            .collect())
+    }
+
+    /// List all file paths in the workspace (flat list).
+    pub async fn list_all_paths(
+        &self,
+        user_id: &str,
+        agent_id: Option<Uuid>,
+    ) -> Result<Vec<String>, WorkspaceError> {
+        let conn = self.conn().await?;
+
+        let rows = conn
+            .query(
+                r#"
+                SELECT path FROM memory_documents
+                WHERE user_id = $1 AND agent_id IS NOT DISTINCT FROM $2
+                ORDER BY path
+                "#,
+                &[&user_id, &agent_id],
+            )
+            .await
+            .map_err(|e| WorkspaceError::SearchFailed {
+                reason: format!("List paths failed: {}", e),
+            })?;
+
+        Ok(rows.iter().map(|row| row.get("path")).collect())
+    }
+
+    /// List all documents for a user.
     pub async fn list_documents(
         &self,
         user_id: &str,
         agent_id: Option<Uuid>,
-        doc_type: Option<DocType>,
     ) -> Result<Vec<MemoryDocument>, WorkspaceError> {
         let conn = self.conn().await?;
 
-        let rows = if let Some(dt) = doc_type {
-            conn.query(
+        let rows = conn
+            .query(
                 r#"
-                SELECT id, user_id, agent_id, doc_type, title, content,
-                       created_at, updated_at, metadata
-                FROM memory_documents
-                WHERE user_id = $1 AND agent_id IS NOT DISTINCT FROM $2 AND doc_type = $3
-                ORDER BY updated_at DESC
-                "#,
-                &[&user_id, &agent_id, &dt.as_str()],
-            )
-            .await
-        } else {
-            conn.query(
-                r#"
-                SELECT id, user_id, agent_id, doc_type, title, content,
+                SELECT id, user_id, agent_id, path, content,
                        created_at, updated_at, metadata
                 FROM memory_documents
                 WHERE user_id = $1 AND agent_id IS NOT DISTINCT FROM $2
@@ -199,30 +260,24 @@ impl Repository {
                 &[&user_id, &agent_id],
             )
             .await
-        };
+            .map_err(|e| WorkspaceError::SearchFailed {
+                reason: format!("Query failed: {}", e),
+            })?;
 
-        let rows = rows.map_err(|e| WorkspaceError::SearchFailed {
-            reason: format!("Query failed: {}", e),
-        })?;
-
-        rows.iter().map(|r| self.row_to_document(r)).collect()
+        Ok(rows.iter().map(|r| self.row_to_document(r)).collect())
     }
 
-    fn row_to_document(&self, row: &tokio_postgres::Row) -> Result<MemoryDocument, WorkspaceError> {
-        let doc_type_str: String = row.get("doc_type");
-        let doc_type = DocType::try_from(doc_type_str.as_str())?;
-
-        Ok(MemoryDocument {
+    fn row_to_document(&self, row: &tokio_postgres::Row) -> MemoryDocument {
+        MemoryDocument {
             id: row.get("id"),
             user_id: row.get("user_id"),
             agent_id: row.get("agent_id"),
-            doc_type,
-            title: row.get("title"),
+            path: row.get("path"),
             content: row.get("content"),
             created_at: row.get("created_at"),
             updated_at: row.get("updated_at"),
             metadata: row.get("metadata"),
-        })
+        }
     }
 
     // ==================== Chunk Operations ====================
@@ -374,7 +429,6 @@ impl Repository {
     ) -> Result<Vec<RankedResult>, WorkspaceError> {
         let conn = self.conn().await?;
 
-        // Use plainto_tsquery for natural language queries
         let rows = conn
             .query(
                 r#"
@@ -401,7 +455,7 @@ impl Repository {
                 chunk_id: row.get("chunk_id"),
                 document_id: row.get("document_id"),
                 content: row.get("content"),
-                rank: (i + 1) as u32, // 1-based rank
+                rank: (i + 1) as u32,
             })
             .collect())
     }
@@ -417,7 +471,6 @@ impl Repository {
         let conn = self.conn().await?;
         let embedding_vec = Vector::from(embedding.to_vec());
 
-        // Use cosine distance (<=>)
         let rows = conn
             .query(
                 r#"
@@ -444,7 +497,7 @@ impl Repository {
                 chunk_id: row.get("chunk_id"),
                 document_id: row.get("document_id"),
                 content: row.get("content"),
-                rank: (i + 1) as u32, // 1-based rank
+                rank: (i + 1) as u32,
             })
             .collect())
     }

@@ -2,7 +2,7 @@
 //!
 //! These tools allow the agent to:
 //! - Search past memories, decisions, and context
-//! - Write important information to long-term memory
+//! - Read and write files in the workspace
 //!
 //! # Usage
 //!
@@ -18,7 +18,7 @@ use async_trait::async_trait;
 
 use crate::context::JobContext;
 use crate::tools::tool::{Tool, ToolError, ToolOutput};
-use crate::workspace::Workspace;
+use crate::workspace::{Workspace, paths};
 
 /// Tool for searching workspace memory.
 ///
@@ -135,7 +135,8 @@ impl Tool for MemoryWriteTool {
     fn description(&self) -> &str {
         "Write to persistent memory. Use for important facts, decisions, preferences, \
          or lessons learned that should be remembered across sessions. Use 'memory' target \
-         for curated long-term facts, 'daily_log' for timestamped session notes."
+         for curated long-term facts, 'daily_log' for timestamped session notes, or \
+         provide a custom path for arbitrary file creation."
     }
 
     fn parameters_schema(&self) -> serde_json::Value {
@@ -148,9 +149,13 @@ impl Tool for MemoryWriteTool {
                 },
                 "target": {
                     "type": "string",
-                    "enum": ["memory", "daily_log"],
-                    "description": "Where to write: 'memory' for long-term curated facts, 'daily_log' for timestamped session notes",
+                    "description": "Where to write: 'memory' for MEMORY.md, 'daily_log' for today's log, or a path like 'projects/alpha/notes.md'",
                     "default": "daily_log"
+                },
+                "append": {
+                    "type": "boolean",
+                    "description": "If true, append to existing content. If false, replace entirely.",
+                    "default": true
                 }
             },
             "required": ["content"]
@@ -182,30 +187,53 @@ impl Tool for MemoryWriteTool {
             .and_then(|v| v.as_str())
             .unwrap_or("daily_log");
 
-        match target {
+        let append = params
+            .get("append")
+            .and_then(|v| v.as_bool())
+            .unwrap_or(true);
+
+        let path = match target {
             "memory" => {
-                self.workspace
-                    .append_memory(content)
-                    .await
-                    .map_err(|e| ToolError::ExecutionFailed(format!("Write failed: {}", e)))?;
+                if append {
+                    self.workspace
+                        .append_memory(content)
+                        .await
+                        .map_err(|e| ToolError::ExecutionFailed(format!("Write failed: {}", e)))?;
+                } else {
+                    self.workspace
+                        .write(paths::MEMORY, content)
+                        .await
+                        .map_err(|e| ToolError::ExecutionFailed(format!("Write failed: {}", e)))?;
+                }
+                paths::MEMORY.to_string()
             }
             "daily_log" => {
                 self.workspace
                     .append_daily_log(content)
                     .await
                     .map_err(|e| ToolError::ExecutionFailed(format!("Write failed: {}", e)))?;
+                format!("daily/{}.md", chrono::Utc::now().format("%Y-%m-%d"))
             }
-            _ => {
-                return Err(ToolError::InvalidParameters(format!(
-                    "invalid target '{}', must be 'memory' or 'daily_log'",
-                    target
-                )));
+            path => {
+                if append {
+                    self.workspace
+                        .append(path, content)
+                        .await
+                        .map_err(|e| ToolError::ExecutionFailed(format!("Write failed: {}", e)))?;
+                } else {
+                    self.workspace
+                        .write(path, content)
+                        .await
+                        .map_err(|e| ToolError::ExecutionFailed(format!("Write failed: {}", e)))?;
+                }
+                path.to_string()
             }
-        }
+        };
 
         let output = serde_json::json!({
             "status": "written",
-            "target": target,
+            "path": path,
+            "append": append,
             "content_length": content.len(),
         });
 
@@ -217,10 +245,9 @@ impl Tool for MemoryWriteTool {
     }
 }
 
-/// Tool for reading specific memory documents.
+/// Tool for reading workspace files.
 ///
-/// Use this to read the full content of identity files, heartbeat checklist,
-/// or other specific documents.
+/// Use this to read the full content of any file in the workspace.
 pub struct MemoryReadTool {
     workspace: Arc<Workspace>,
 }
@@ -239,25 +266,20 @@ impl Tool for MemoryReadTool {
     }
 
     fn description(&self) -> &str {
-        "Read a specific memory document by type. Use this to read identity files, \
-         heartbeat checklist, or full memory document content."
+        "Read a file from the workspace. Use this to read identity files, \
+         heartbeat checklist, memory, daily logs, or any custom file."
     }
 
     fn parameters_schema(&self) -> serde_json::Value {
         serde_json::json!({
             "type": "object",
             "properties": {
-                "doc_type": {
+                "path": {
                     "type": "string",
-                    "enum": ["memory", "daily_log", "identity", "soul", "agents", "user", "heartbeat"],
-                    "description": "The type of document to read"
-                },
-                "title": {
-                    "type": "string",
-                    "description": "Optional title (required for daily_log, format: YYYY-MM-DD)"
+                    "description": "Path to the file (e.g., 'MEMORY.md', 'daily/2024-01-15.md', 'projects/alpha/notes.md')"
                 }
             },
-            "required": ["doc_type"]
+            "required": ["path"]
         })
     }
 
@@ -268,27 +290,19 @@ impl Tool for MemoryReadTool {
     ) -> Result<ToolOutput, ToolError> {
         let start = std::time::Instant::now();
 
-        let doc_type_str = params
-            .get("doc_type")
+        let path = params
+            .get("path")
             .and_then(|v| v.as_str())
-            .ok_or_else(|| {
-                ToolError::InvalidParameters("missing 'doc_type' parameter".to_string())
-            })?;
-
-        let doc_type = crate::workspace::DocType::try_from(doc_type_str)
-            .map_err(|e| ToolError::InvalidParameters(e.to_string()))?;
-
-        let title = params.get("title").and_then(|v| v.as_str());
+            .ok_or_else(|| ToolError::InvalidParameters("missing 'path' parameter".to_string()))?;
 
         let doc = self
             .workspace
-            .get_document(doc_type, title)
+            .read(path)
             .await
             .map_err(|e| ToolError::ExecutionFailed(format!("Read failed: {}", e)))?;
 
         let output = serde_json::json!({
-            "doc_type": doc_type_str,
-            "title": doc.title,
+            "path": doc.path,
             "content": doc.content,
             "word_count": doc.word_count(),
             "updated_at": doc.updated_at.to_rfc3339(),
@@ -302,16 +316,88 @@ impl Tool for MemoryReadTool {
     }
 }
 
+/// Tool for listing workspace files.
+///
+/// Use this to explore the workspace structure.
+pub struct MemoryListTool {
+    workspace: Arc<Workspace>,
+}
+
+impl MemoryListTool {
+    /// Create a new memory list tool.
+    pub fn new(workspace: Arc<Workspace>) -> Self {
+        Self { workspace }
+    }
+}
+
+#[async_trait]
+impl Tool for MemoryListTool {
+    fn name(&self) -> &str {
+        "memory_list"
+    }
+
+    fn description(&self) -> &str {
+        "List files and directories in the workspace. Use this to explore \
+         the workspace structure and discover available files."
+    }
+
+    fn parameters_schema(&self) -> serde_json::Value {
+        serde_json::json!({
+            "type": "object",
+            "properties": {
+                "directory": {
+                    "type": "string",
+                    "description": "Directory to list (empty string or '/' for root)",
+                    "default": ""
+                }
+            }
+        })
+    }
+
+    async fn execute(
+        &self,
+        params: serde_json::Value,
+        _ctx: &JobContext,
+    ) -> Result<ToolOutput, ToolError> {
+        let start = std::time::Instant::now();
+
+        let directory = params
+            .get("directory")
+            .and_then(|v| v.as_str())
+            .unwrap_or("");
+
+        let entries = self
+            .workspace
+            .list(directory)
+            .await
+            .map_err(|e| ToolError::ExecutionFailed(format!("List failed: {}", e)))?;
+
+        let output = serde_json::json!({
+            "directory": directory,
+            "entries": entries.iter().map(|e| serde_json::json!({
+                "path": e.path,
+                "name": e.name(),
+                "is_directory": e.is_directory,
+                "updated_at": e.updated_at.map(|t| t.to_rfc3339()),
+                "preview": e.content_preview,
+            })).collect::<Vec<_>>(),
+            "count": entries.len(),
+        });
+
+        Ok(ToolOutput::success(output, start.elapsed()))
+    }
+
+    fn requires_sanitization(&self) -> bool {
+        false // Internal tool
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
 
-    // Integration tests would require a database connection.
-    // Unit tests for parameter validation:
-
-    #[test]
-    fn test_memory_search_schema() {
-        let workspace = Arc::new(Workspace::new(
+    fn make_test_workspace() -> Arc<Workspace> {
+        Arc::new(Workspace::new(
             "test_user",
             deadpool_postgres::Pool::builder(deadpool_postgres::Manager::new(
                 tokio_postgres::Config::new(),
@@ -319,7 +405,12 @@ mod tests {
             ))
             .build()
             .unwrap(),
-        ));
+        ))
+    }
+
+    #[test]
+    fn test_memory_search_schema() {
+        let workspace = make_test_workspace();
         let tool = MemorySearchTool::new(workspace);
 
         assert_eq!(tool.name(), "memory_search");
@@ -337,26 +428,42 @@ mod tests {
 
     #[test]
     fn test_memory_write_schema() {
-        let workspace = Arc::new(Workspace::new(
-            "test_user",
-            deadpool_postgres::Pool::builder(deadpool_postgres::Manager::new(
-                tokio_postgres::Config::new(),
-                tokio_postgres::NoTls,
-            ))
-            .build()
-            .unwrap(),
-        ));
+        let workspace = make_test_workspace();
         let tool = MemoryWriteTool::new(workspace);
 
         assert_eq!(tool.name(), "memory_write");
 
         let schema = tool.parameters_schema();
         assert!(schema["properties"]["content"].is_object());
+        assert!(schema["properties"]["target"].is_object());
+        assert!(schema["properties"]["append"].is_object());
+    }
+
+    #[test]
+    fn test_memory_read_schema() {
+        let workspace = make_test_workspace();
+        let tool = MemoryReadTool::new(workspace);
+
+        assert_eq!(tool.name(), "memory_read");
+
+        let schema = tool.parameters_schema();
+        assert!(schema["properties"]["path"].is_object());
         assert!(
-            schema["properties"]["target"]["enum"]
+            schema["required"]
                 .as_array()
                 .unwrap()
-                .contains(&"memory".into())
+                .contains(&"path".into())
         );
+    }
+
+    #[test]
+    fn test_memory_list_schema() {
+        let workspace = make_test_workspace();
+        let tool = MemoryListTool::new(workspace);
+
+        assert_eq!(tool.name(), "memory_list");
+
+        let schema = tool.parameters_schema();
+        assert!(schema["properties"]["directory"].is_object());
     }
 }

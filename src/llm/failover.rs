@@ -216,7 +216,10 @@ impl FailoverProvider {
                         .cooldown_activated_nanos
                         .load(Ordering::Relaxed)
                 })
-                .expect("providers list is non-empty");
+                .ok_or_else(|| LlmError::RequestFailed {
+                    provider: "failover".to_string(),
+                    reason: "FailoverProvider requires at least one provider".to_string(),
+                })?;
             tracing::info!(
                 provider = %self.providers[oldest].model_name(),
                 "All providers in cooldown, trying oldest-cooled provider"
@@ -266,9 +269,10 @@ impl FailoverProvider {
             }
         }
 
-        // SAFETY: `available` is non-empty (guaranteed above), so at least one
-        // iteration ran and `last_error` is `Some`.
-        Err(last_error.expect("available providers list is non-empty"))
+        Err(last_error.unwrap_or_else(|| LlmError::RequestFailed {
+            provider: "failover".to_string(),
+            reason: "Invariant violated in FailoverProvider: providers were exhausted but no last_error was recorded (this branch should be unreachable; possible causes: no provider attempts were made or `available` was unexpectedly empty).".to_string(),
+        }))
     }
 }
 

@@ -13,6 +13,7 @@ use uuid::Uuid;
 
 use crate::error::OrchestratorError;
 use crate::orchestrator::auth::{CredentialGrant, TokenStore};
+use crate::orchestrator::providers::{DetectedProvider, detect_providers, provider_env_key};
 use crate::sandbox::connect_docker;
 
 /// Per-job overrides for model, provider, and runtime parameters.
@@ -96,8 +97,6 @@ pub struct ContainerJobConfig {
     pub pi_code_memory_limit_mb: u64,
     /// Allowed tool names for Pi (passed as PI_CODE_ALLOWED_TOOLS env var).
     pub pi_code_allowed_tools: Vec<String>,
-    /// Available provider:model pairs the agent can dispatch Pi jobs to.
-    pub pi_code_available_models: Vec<crate::config::ProviderModel>,
 }
 
 impl Default for ContainerJobConfig {
@@ -118,7 +117,6 @@ impl Default for ContainerJobConfig {
             pi_code_max_turns: 50,
             pi_code_memory_limit_mb: 4096,
             pi_code_allowed_tools: crate::config::PiCodeConfig::default().allowed_tools,
-            pi_code_available_models: Vec::new(),
         }
     }
 }
@@ -244,13 +242,15 @@ fn validate_bind_mount_path(
 /// Summary of a single sandbox runtime mode's configuration.
 #[derive(Debug, Clone, serde::Serialize)]
 pub struct RuntimeModeInfo {
+    /// The configured default model for this runtime.
     pub default_model: String,
+    /// The configured default provider for this runtime.
     pub default_provider: String,
     pub max_turns: u32,
-    pub has_credentials: bool,
-    /// All provider:model pairs this runtime can dispatch to.
-    /// Always includes the default as the first entry.
-    pub available_models: Vec<crate::config::ProviderModel>,
+    /// Providers detected as available (have API keys set on the host).
+    /// The agent can dispatch jobs to any of these by setting `provider`
+    /// and `model` on `create_job`.
+    pub available_providers: Vec<DetectedProvider>,
 }
 
 /// Summary of all sandbox runtime configuration, returned by
@@ -282,28 +282,24 @@ impl ContainerJobManager {
     }
 
     /// Return the configured sandbox runtime information for introspection.
+    ///
+    /// For Pi, available providers are auto-detected by probing which API-key
+    /// env vars are set on the host.
     pub fn runtime_info(&self) -> SandboxRuntimeInfo {
-        use crate::config::ProviderModel;
-
-        // Claude Code: single provider (anthropic), just the default model.
-        let claude_models = vec![ProviderModel {
-            provider: "anthropic".to_string(),
-            model: self.config.claude_code_model.clone(),
-        }];
-
-        // Pi: start with the default, then append any extras from config.
-        let default_pi = ProviderModel {
-            provider: self.config.pi_code_provider.clone(),
-            model: self.config.pi_code_model.clone(),
+        // Claude Code: only anthropic, detected from credentials.
+        let claude_has_creds = self.config.claude_code_api_key.is_some()
+            || self.config.claude_code_oauth_token.is_some();
+        let claude_providers = if claude_has_creds {
+            vec![DetectedProvider {
+                provider: "anthropic".to_string(),
+                is_default: true,
+            }]
+        } else {
+            Vec::new()
         };
-        let mut pi_models = vec![default_pi];
-        for pm in &self.config.pi_code_available_models {
-            // Skip duplicates of the default.
-            if pm.provider != self.config.pi_code_provider || pm.model != self.config.pi_code_model
-            {
-                pi_models.push(pm.clone());
-            }
-        }
+
+        // Pi: auto-detect from host env vars.
+        let pi_providers = detect_providers(&self.config.pi_code_provider);
 
         SandboxRuntimeInfo {
             sandbox_image: self.config.image.clone(),
@@ -311,17 +307,13 @@ impl ContainerJobManager {
                 default_model: self.config.claude_code_model.clone(),
                 default_provider: "anthropic".to_string(),
                 max_turns: self.config.claude_code_max_turns,
-                has_credentials: self.config.claude_code_api_key.is_some()
-                    || self.config.claude_code_oauth_token.is_some(),
-                available_models: claude_models,
+                available_providers: claude_providers,
             },
             pi_code: RuntimeModeInfo {
                 default_model: self.config.pi_code_model.clone(),
                 default_provider: self.config.pi_code_provider.clone(),
                 max_turns: self.config.pi_code_max_turns,
-                has_credentials: self.config.claude_code_api_key.is_some()
-                    || self.config.claude_code_oauth_token.is_some(),
-                available_models: pi_models,
+                available_providers: pi_providers,
             },
         }
     }
@@ -469,25 +461,18 @@ impl ContainerJobManager {
                 .as_deref()
                 .unwrap_or(&self.config.pi_code_provider);
             // Inject API key based on resolved provider
-            let provider_env_key = match resolved_provider {
-                "anthropic" => "ANTHROPIC_API_KEY",
-                "openai" => "OPENAI_API_KEY",
-                "google" | "gemini" => "GEMINI_API_KEY",
-                "groq" => "GROQ_API_KEY",
-                "xai" => "XAI_API_KEY",
-                other => {
-                    return Err(OrchestratorError::ContainerCreationFailed {
-                        job_id,
-                        reason: format!(
-                            "Unknown PI_CODE_PROVIDER '{}'. \
-                             Supported: anthropic, openai, google, gemini, groq, xai",
-                            other
-                        ),
-                    });
+            let env_key = provider_env_key(resolved_provider).ok_or_else(|| {
+                OrchestratorError::ContainerCreationFailed {
+                    job_id,
+                    reason: format!(
+                        "Unknown PI_CODE_PROVIDER '{}'. \
+                         Supported: anthropic, openai, google, gemini, groq, xai",
+                        resolved_provider
+                    ),
                 }
-            };
-            if let Ok(key) = std::env::var(provider_env_key) {
-                env_vec.push(format!("{}={}", provider_env_key, key));
+            })?;
+            if let Ok(key) = std::env::var(env_key) {
+                env_vec.push(format!("{env_key}={key}"));
             }
             if !self.config.pi_code_allowed_tools.is_empty() {
                 env_vec.push(format!(

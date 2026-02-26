@@ -42,7 +42,7 @@ pub use self::llm::{
 };
 pub use self::routines::RoutineConfig;
 pub use self::safety::SafetyConfig;
-pub use self::sandbox::{ClaudeCodeConfig, PiCodeConfig, ProviderModel, SandboxModeConfig};
+pub use self::sandbox::{ClaudeCodeConfig, PiCodeConfig, SandboxModeConfig};
 pub use self::secrets::SecretsConfig;
 pub use self::skills::SkillsConfig;
 pub use self::tunnel::TunnelConfig;

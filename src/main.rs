@@ -306,7 +306,6 @@ async fn main() -> anyhow::Result<()> {
             pi_code_max_turns: config.pi_code.max_turns,
             pi_code_memory_limit_mb: config.pi_code.memory_limit_mb,
             pi_code_allowed_tools: config.pi_code.allowed_tools.clone(),
-            pi_code_available_models: config.pi_code.available_models.clone(),
         };
         let jm = Arc::new(ContainerJobManager::new(job_config, token_store.clone()));
 

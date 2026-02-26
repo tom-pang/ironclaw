@@ -21,3 +21,54 @@ jobs:
         run: cargo test --all-features -- --nocapture
       - name: Run Telegram Channel Tests
         run: cargo test --manifest-path channels-src/telegram/Cargo.toml -- --nocapture
+
+  # Warm the WASM extension cache on main so release tag pushes get cache hits
+  warm-wasm-cache:
+    name: Warm WASM Cache
+    if: github.event_name == 'push' && github.ref == 'refs/heads/main'
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v6
+      - name: Install Rust
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: wasm32-wasip2
+      - name: Cache cargo-component binary
+        id: cache-cargo-component
+        uses: actions/cache@v4
+        with:
+          path: ~/.cargo/bin/cargo-component
+          key: cargo-component-0.21.1
+      - name: Install cargo-component
+        if: steps.cache-cargo-component.outputs.cache-hit != 'true'
+        run: cargo install cargo-component@0.21.1 --locked
+      - uses: swatinem/rust-cache@v2
+        with:
+          shared-key: wasm-extensions
+          workspaces: |-
+            channels-src/discord
+            channels-src/slack
+            channels-src/telegram
+            channels-src/whatsapp
+            tools-src/github
+            tools-src/gmail
+            tools-src/google-calendar
+            tools-src/google-docs
+            tools-src/google-drive
+            tools-src/google-sheets
+            tools-src/google-slides
+            tools-src/okta
+            tools-src/slack
+            tools-src/telegram
+      - name: Build all WASM extensions
+        shell: bash
+        run: |
+          set -euo pipefail
+          for manifest in registry/tools/*.json registry/channels/*.json; do
+            [ -f "$manifest" ] || continue
+            source_dir=$(jq -r '.source.dir' "$manifest")
+            name=$(jq -r '.name' "$manifest")
+            [ -d "$source_dir" ] || continue
+            echo "=== Building $name ==="
+            cargo component build --release --manifest-path "$source_dir/Cargo.toml"
+          done

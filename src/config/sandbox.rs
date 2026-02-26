@@ -1,6 +1,35 @@
 use crate::config::helpers::{optional_env, parse_bool_env, parse_optional_env, parse_string_env};
 use crate::error::ConfigError;
 
+/// A provider:model pair that can be dispatched to for sandbox jobs.
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
+pub struct ProviderModel {
+    pub provider: String,
+    pub model: String,
+}
+
+impl std::fmt::Display for ProviderModel {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "{}:{}", self.provider, self.model)
+    }
+}
+
+impl ProviderModel {
+    /// Parse a `"provider:model"` string. Returns `None` if the format is invalid.
+    pub fn parse(s: &str) -> Option<Self> {
+        let (provider, model) = s.split_once(':')?;
+        let provider = provider.trim();
+        let model = model.trim();
+        if provider.is_empty() || model.is_empty() {
+            return None;
+        }
+        Some(Self {
+            provider: provider.to_string(),
+            model: model.to_string(),
+        })
+    }
+}
+
 /// Docker sandbox configuration.
 #[derive(Debug, Clone)]
 pub struct SandboxModeConfig {
@@ -246,6 +275,12 @@ pub struct PiCodeConfig {
     /// Pi uses `--tools <list>` to restrict available tools. These follow Pi's
     /// tool naming: `read`, `write`, `edit`, `bash`, `grep`, `find`, `ls`.
     pub allowed_tools: Vec<String>,
+    /// Available provider:model pairs the agent can dispatch to.
+    ///
+    /// Parsed from `PI_CODE_AVAILABLE_MODELS` env var as comma-separated
+    /// `provider:model` entries (e.g. `"anthropic:claude-sonnet-4-20250514,openai:gpt-4o"`).
+    /// When empty, only the default `provider:model` is reported.
+    pub available_models: Vec<ProviderModel>,
 }
 
 /// Default allowed tools for Pi inside containers.
@@ -269,6 +304,7 @@ impl Default for PiCodeConfig {
             max_turns: 50,
             memory_limit_mb: 4096,
             allowed_tools: default_pi_code_allowed_tools(),
+            available_models: Vec::new(),
         }
     }
 }
@@ -304,6 +340,13 @@ impl PiCodeConfig {
                         .collect()
                 })
                 .unwrap_or(defaults.allowed_tools),
+            available_models: optional_env("PI_CODE_AVAILABLE_MODELS")?
+                .map(|s| {
+                    s.split(',')
+                        .filter_map(|entry| ProviderModel::parse(entry.trim()))
+                        .collect()
+                })
+                .unwrap_or_default(),
         })
     }
 }

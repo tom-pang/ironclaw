@@ -96,6 +96,8 @@ pub struct ContainerJobConfig {
     pub pi_code_memory_limit_mb: u64,
     /// Allowed tool names for Pi (passed as PI_CODE_ALLOWED_TOOLS env var).
     pub pi_code_allowed_tools: Vec<String>,
+    /// Available provider:model pairs the agent can dispatch Pi jobs to.
+    pub pi_code_available_models: Vec<crate::config::ProviderModel>,
 }
 
 impl Default for ContainerJobConfig {
@@ -116,6 +118,7 @@ impl Default for ContainerJobConfig {
             pi_code_max_turns: 50,
             pi_code_memory_limit_mb: 4096,
             pi_code_allowed_tools: crate::config::PiCodeConfig::default().allowed_tools,
+            pi_code_available_models: Vec::new(),
         }
     }
 }
@@ -245,6 +248,9 @@ pub struct RuntimeModeInfo {
     pub default_provider: String,
     pub max_turns: u32,
     pub has_credentials: bool,
+    /// All provider:model pairs this runtime can dispatch to.
+    /// Always includes the default as the first entry.
+    pub available_models: Vec<crate::config::ProviderModel>,
 }
 
 /// Summary of all sandbox runtime configuration, returned by
@@ -277,6 +283,28 @@ impl ContainerJobManager {
 
     /// Return the configured sandbox runtime information for introspection.
     pub fn runtime_info(&self) -> SandboxRuntimeInfo {
+        use crate::config::ProviderModel;
+
+        // Claude Code: single provider (anthropic), just the default model.
+        let claude_models = vec![ProviderModel {
+            provider: "anthropic".to_string(),
+            model: self.config.claude_code_model.clone(),
+        }];
+
+        // Pi: start with the default, then append any extras from config.
+        let default_pi = ProviderModel {
+            provider: self.config.pi_code_provider.clone(),
+            model: self.config.pi_code_model.clone(),
+        };
+        let mut pi_models = vec![default_pi];
+        for pm in &self.config.pi_code_available_models {
+            // Skip duplicates of the default.
+            if pm.provider != self.config.pi_code_provider || pm.model != self.config.pi_code_model
+            {
+                pi_models.push(pm.clone());
+            }
+        }
+
         SandboxRuntimeInfo {
             sandbox_image: self.config.image.clone(),
             claude_code: RuntimeModeInfo {
@@ -285,6 +313,7 @@ impl ContainerJobManager {
                 max_turns: self.config.claude_code_max_turns,
                 has_credentials: self.config.claude_code_api_key.is_some()
                     || self.config.claude_code_oauth_token.is_some(),
+                available_models: claude_models,
             },
             pi_code: RuntimeModeInfo {
                 default_model: self.config.pi_code_model.clone(),
@@ -292,6 +321,7 @@ impl ContainerJobManager {
                 max_turns: self.config.pi_code_max_turns,
                 has_credentials: self.config.claude_code_api_key.is_some()
                     || self.config.claude_code_oauth_token.is_some(),
+                available_models: pi_models,
             },
         }
     }

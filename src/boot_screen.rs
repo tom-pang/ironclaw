@@ -22,6 +22,7 @@ pub struct BootInfo {
     pub sandbox_enabled: bool,
     pub docker_status: crate::sandbox::detect::DockerStatus,
     pub claude_code_enabled: bool,
+    pub pi_code_enabled: bool,
     pub routines_enabled: bool,
     pub skills_enabled: bool,
     pub channels: Vec<String>,
@@ -110,6 +111,9 @@ pub fn print_boot_screen(info: &BootInfo) {
     if info.claude_code_enabled {
         features.push("claude-code".to_string());
     }
+    if info.pi_code_enabled {
+        features.push("pi-code".to_string());
+    }
     if info.routines_enabled {
         features.push("routines".to_string());
     }
@@ -178,6 +182,7 @@ mod tests {
             sandbox_enabled: true,
             docker_status: DockerStatus::Available,
             claude_code_enabled: false,
+            pi_code_enabled: false,
             routines_enabled: true,
             skills_enabled: true,
             channels: vec![
@@ -211,6 +216,7 @@ mod tests {
             sandbox_enabled: false,
             docker_status: DockerStatus::Disabled,
             claude_code_enabled: false,
+            pi_code_enabled: false,
             routines_enabled: false,
             skills_enabled: false,
             channels: vec![],
@@ -240,6 +246,7 @@ mod tests {
             sandbox_enabled: false,
             docker_status: DockerStatus::Disabled,
             claude_code_enabled: false,
+            pi_code_enabled: false,
             routines_enabled: false,
             skills_enabled: false,
             channels: vec!["repl".to_string()],

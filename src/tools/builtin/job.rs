@@ -316,15 +316,13 @@ impl CreateJobTool {
         });
 
         // Persist the job mode to DB
-        if mode == JobMode::ClaudeCode
+        if matches!(mode, JobMode::ClaudeCode | JobMode::PiCode)
             && let Some(store) = self.store.clone()
         {
             let job_id_copy = job_id;
+            let mode_str = mode.as_str().to_string();
             tokio::spawn(async move {
-                if let Err(e) = store
-                    .update_sandbox_job_mode(job_id_copy, "claude_code")
-                    .await
-                {
+                if let Err(e) = store.update_sandbox_job_mode(job_id_copy, &mode_str).await {
                     tracing::warn!(job_id = %job_id_copy, "Failed to set job mode: {}", e);
                 }
             });
@@ -642,7 +640,7 @@ impl Tool for CreateJobTool {
              whenever the user asks you to build, create, or work on something. The task \
              description should be detailed enough for the sub-agent to work independently. \
              Set wait=false to start immediately while continuing the conversation. Set mode \
-             to 'claude_code' for complex software engineering tasks."
+             to 'claude_code' or 'pi_code' for complex software engineering tasks."
         } else {
             "Create a new job or task for the agent to work on. Use this when the user wants \
              you to do something substantial that should be tracked as a separate job."
@@ -669,9 +667,10 @@ impl Tool for CreateJobTool {
                     },
                     "mode": {
                         "type": "string",
-                        "enum": ["worker", "claude_code"],
+                        "enum": ["worker", "claude_code", "pi_code"],
                         "description": "Execution mode. 'worker' (default) uses the IronClaw sub-agent. \
-                                        'claude_code' uses Claude Code CLI for full agentic software engineering."
+                                        'claude_code' uses Claude Code CLI for full agentic software engineering. \
+                                        'pi_code' uses the Pi coding agent CLI."
                     },
                     "project_dir": {
                         "type": "string",
@@ -733,6 +732,7 @@ impl Tool for CreateJobTool {
 
             let mode = match params.get("mode").and_then(|v| v.as_str()) {
                 Some("claude_code") => JobMode::ClaudeCode,
+                Some("pi_code") => JobMode::PiCode,
                 _ => JobMode::Worker,
             };
 

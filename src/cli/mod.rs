@@ -157,6 +157,10 @@ pub enum Command {
         /// Claude model to use (e.g. "sonnet", "opus").
         #[arg(long, default_value = "sonnet")]
         model: String,
+
+        /// Reasoning effort level (e.g. "low", "medium", "high").
+        #[arg(long)]
+        reasoning_effort: Option<String>,
     },
 
     /// Run as a Pi coding agent bridge inside a Docker container (internal use).
@@ -181,6 +185,10 @@ pub enum Command {
         /// Model ID to use (e.g. "claude-sonnet-4-20250514").
         #[arg(long, default_value = "claude-sonnet-4-20250514")]
         model: String,
+
+        /// Reasoning effort level (e.g. "low", "medium", "high").
+        #[arg(long)]
+        reasoning_effort: Option<String>,
     },
 }
 

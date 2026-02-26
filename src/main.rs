@@ -107,9 +107,17 @@ async fn main() -> anyhow::Result<()> {
             orchestrator_url,
             max_turns,
             model,
+            reasoning_effort,
         }) => {
             init_worker_tracing();
-            return run_claude_bridge(*job_id, orchestrator_url, *max_turns, model).await;
+            return run_claude_bridge(
+                *job_id,
+                orchestrator_url,
+                *max_turns,
+                model,
+                reasoning_effort.clone(),
+            )
+            .await;
         }
         Some(Command::PiBridge {
             job_id,
@@ -117,9 +125,18 @@ async fn main() -> anyhow::Result<()> {
             max_turns,
             provider,
             model,
+            reasoning_effort,
         }) => {
             init_worker_tracing();
-            return run_pi_bridge(*job_id, orchestrator_url, *max_turns, provider, model).await;
+            return run_pi_bridge(
+                *job_id,
+                orchestrator_url,
+                *max_turns,
+                provider,
+                model,
+                reasoning_effort.clone(),
+            )
+            .await;
         }
         Some(Command::Onboard {
             skip_auth,
@@ -750,12 +767,14 @@ async fn run_claude_bridge(
     orchestrator_url: &str,
     max_turns: u32,
     model: &str,
+    reasoning_effort: Option<String>,
 ) -> anyhow::Result<()> {
     tracing::info!(
-        "Starting Claude Code bridge for job {} (orchestrator: {}, model: {})",
+        "Starting Claude Code bridge for job {} (orchestrator: {}, model: {}, reasoning_effort: {:?})",
         job_id,
         orchestrator_url,
-        model
+        model,
+        reasoning_effort,
     );
 
     let config = ironclaw::worker::claude_bridge::ClaudeBridgeConfig {
@@ -764,6 +783,7 @@ async fn run_claude_bridge(
         max_turns,
         model: model.to_string(),
         allowed_tools: ironclaw::config::ClaudeCodeConfig::from_env().allowed_tools,
+        reasoning_effort,
     };
 
     let runtime = ironclaw::worker::ClaudeBridgeRuntime::new(config)
@@ -782,13 +802,15 @@ async fn run_pi_bridge(
     max_turns: u32,
     provider: &str,
     model: &str,
+    reasoning_effort: Option<String>,
 ) -> anyhow::Result<()> {
     tracing::info!(
-        "Starting Pi bridge for job {} (orchestrator: {}, provider: {}, model: {})",
+        "Starting Pi bridge for job {} (orchestrator: {}, provider: {}, model: {}, reasoning_effort: {:?})",
         job_id,
         orchestrator_url,
         provider,
-        model
+        model,
+        reasoning_effort,
     );
 
     let pi_config = ironclaw::config::PiCodeConfig::from_env();
@@ -800,6 +822,7 @@ async fn run_pi_bridge(
         provider: provider.to_string(),
         model: model.to_string(),
         allowed_tools: pi_config.allowed_tools,
+        reasoning_effort,
     };
 
     let runtime = ironclaw::worker::PiBridgeRuntime::new(config)

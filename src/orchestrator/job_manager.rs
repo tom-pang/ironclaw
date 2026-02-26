@@ -15,6 +15,24 @@ use crate::error::OrchestratorError;
 use crate::orchestrator::auth::{CredentialGrant, TokenStore};
 use crate::sandbox::connect_docker;
 
+/// Per-job overrides for model, provider, and runtime parameters.
+///
+/// These allow callers to select a specific model or reasoning effort at job
+/// creation time instead of being locked to the process-level env-var defaults.
+/// Any `None` field falls back to the configured default.
+#[derive(Debug, Clone, Default)]
+pub struct RuntimeDispatchOverrides {
+    /// LLM provider override (e.g. "anthropic", "openai"). Pi-only.
+    pub provider: Option<String>,
+    /// Model override (e.g. "opus", "claude-sonnet-4-20250514").
+    pub model: Option<String>,
+    /// Maximum agentic turns override.
+    pub max_turns: Option<u32>,
+    /// Reasoning effort level (e.g. "low", "medium", "high"). Passed as
+    /// `--reasoning-effort` to Pi and `--reasoning-effort` to Claude Code.
+    pub reasoning_effort: Option<String>,
+}
+
 /// Which mode a sandbox container runs in.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum JobMode {
@@ -261,6 +279,8 @@ impl ContainerJobManager {
     /// The caller provides the `job_id` so it can be persisted to the database
     /// before the container is created. Credential grants are stored in the
     /// TokenStore and served on-demand via the `/credentials` endpoint.
+    /// `overrides` allows per-job model/provider/max_turns/reasoning_effort
+    /// selection at runtime, falling back to configured defaults for any `None` field.
     /// Returns the auth token for the worker.
     pub async fn create_job(
         &self,
@@ -269,6 +289,7 @@ impl ContainerJobManager {
         project_dir: Option<PathBuf>,
         mode: JobMode,
         credential_grants: Vec<CredentialGrant>,
+        overrides: RuntimeDispatchOverrides,
     ) -> Result<String, OrchestratorError> {
         // Generate auth token (stored in TokenStore, never logged)
         let token = self.token_store.create_token(job_id).await;
@@ -296,7 +317,7 @@ impl ContainerJobManager {
         // Run the actual container creation. On any failure, revoke the token
         // and remove the handle so we don't leak resources.
         match self
-            .create_job_inner(job_id, &token, project_dir, mode)
+            .create_job_inner(job_id, &token, project_dir, mode, &overrides)
             .await
         {
             Ok(()) => Ok(token),
@@ -315,6 +336,7 @@ impl ContainerJobManager {
         token: &str,
         project_dir: Option<PathBuf>,
         mode: JobMode,
+        overrides: &RuntimeDispatchOverrides,
     ) -> Result<(), OrchestratorError> {
         // Connect to Docker (reuses cached connection)
         let docker = self.docker().await?;
@@ -365,15 +387,20 @@ impl ContainerJobManager {
             }
         }
 
-        // Pi Code mode: inject API key for the configured provider.
+        // Pi Code mode: inject API key for the resolved provider.
         //
         // Pi reads standard env vars per provider (ANTHROPIC_API_KEY,
         // OPENAI_API_KEY, etc.). We inject whichever key matches the
-        // configured provider. The bridge also receives the allowed tools
-        // list for `--tools` restriction.
+        // resolved provider (override or config default). The bridge also
+        // receives the allowed tools list for `--tools` restriction.
         if mode == JobMode::PiCode {
-            // Inject API key based on configured provider
-            let provider_env_key = match self.config.pi_code_provider.as_str() {
+            // Resolve provider: per-job override takes priority
+            let resolved_provider = overrides
+                .provider
+                .as_deref()
+                .unwrap_or(&self.config.pi_code_provider);
+            // Inject API key based on resolved provider
+            let provider_env_key = match resolved_provider {
                 "anthropic" => "ANTHROPIC_API_KEY",
                 "openai" => "OPENAI_API_KEY",
                 "google" | "gemini" => "GEMINI_API_KEY",
@@ -429,8 +456,26 @@ impl ContainerJobManager {
             ..Default::default()
         };
 
-        // Build CMD based on mode
-        let cmd = match mode {
+        // Resolve per-job overrides (fall back to config defaults).
+        let resolved_claude_model = overrides
+            .model
+            .as_deref()
+            .unwrap_or(&self.config.claude_code_model);
+        let resolved_claude_max_turns = overrides
+            .max_turns
+            .unwrap_or(self.config.claude_code_max_turns);
+        let resolved_pi_provider = overrides
+            .provider
+            .as_deref()
+            .unwrap_or(&self.config.pi_code_provider);
+        let resolved_pi_model = overrides
+            .model
+            .as_deref()
+            .unwrap_or(&self.config.pi_code_model);
+        let resolved_pi_max_turns = overrides.max_turns.unwrap_or(self.config.pi_code_max_turns);
+
+        // Build CMD based on mode, applying per-job overrides.
+        let mut cmd = match mode {
             JobMode::Worker => vec![
                 "worker".to_string(),
                 "--job-id".to_string(),
@@ -445,9 +490,9 @@ impl ContainerJobManager {
                 "--orchestrator-url".to_string(),
                 orchestrator_url.clone(),
                 "--max-turns".to_string(),
-                self.config.claude_code_max_turns.to_string(),
+                resolved_claude_max_turns.to_string(),
                 "--model".to_string(),
-                self.config.claude_code_model.clone(),
+                resolved_claude_model.to_string(),
             ],
             JobMode::PiCode => vec![
                 "pi-bridge".to_string(),
@@ -456,13 +501,21 @@ impl ContainerJobManager {
                 "--orchestrator-url".to_string(),
                 orchestrator_url.clone(),
                 "--max-turns".to_string(),
-                self.config.pi_code_max_turns.to_string(),
+                resolved_pi_max_turns.to_string(),
                 "--provider".to_string(),
-                self.config.pi_code_provider.clone(),
+                resolved_pi_provider.to_string(),
                 "--model".to_string(),
-                self.config.pi_code_model.clone(),
+                resolved_pi_model.to_string(),
             ],
         };
+
+        // Append --reasoning-effort if specified (supported by both bridges).
+        if let Some(ref effort) = overrides.reasoning_effort
+            && matches!(mode, JobMode::ClaudeCode | JobMode::PiCode)
+        {
+            cmd.push("--reasoning-effort".to_string());
+            cmd.push(effort.clone());
+        }
 
         let container_config = Config {
             image: Some(self.config.image.clone()),

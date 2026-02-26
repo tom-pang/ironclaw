@@ -43,6 +43,9 @@ pub struct PiBridgeConfig {
     pub model: String,
     /// Tool names to enable via `--tools` (e.g. `["read", "write", "edit", "bash"]`).
     pub allowed_tools: Vec<String>,
+    /// Optional reasoning effort level (e.g. "low", "medium", "high").
+    /// Passed as `--reasoning-effort` to the `pi` CLI.
+    pub reasoning_effort: Option<String>,
 }
 
 /// A Pi coding agent streaming event (NDJSON line from `--mode json`).
@@ -375,6 +378,11 @@ export default function(pi: any) {{
         // `--continue` loads the most recent one.
         if is_follow_up {
             cmd.arg("--continue");
+        }
+
+        // Pass reasoning effort if specified
+        if let Some(ref effort) = self.config.reasoning_effort {
+            cmd.arg("--reasoning-effort").arg(effort);
         }
 
         // Restrict tools if configured

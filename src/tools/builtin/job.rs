@@ -20,7 +20,7 @@ use crate::context::{ContextManager, JobContext, JobState};
 use crate::db::Database;
 use crate::history::SandboxJobRecord;
 use crate::orchestrator::auth::CredentialGrant;
-use crate::orchestrator::job_manager::{ContainerJobManager, JobMode};
+use crate::orchestrator::job_manager::{ContainerJobManager, JobMode, RuntimeDispatchOverrides};
 use crate::secrets::SecretsStore;
 use crate::tools::tool::{ApprovalRequirement, Tool, ToolError, ToolOutput, require_str};
 
@@ -270,6 +270,7 @@ impl CreateJobTool {
     }
 
     /// Execute via sandboxed Docker container.
+    #[allow(clippy::too_many_arguments)]
     async fn execute_sandbox(
         &self,
         task: &str,
@@ -277,6 +278,7 @@ impl CreateJobTool {
         wait: bool,
         mode: JobMode,
         credential_grants: Vec<CredentialGrant>,
+        overrides: RuntimeDispatchOverrides,
         ctx: &JobContext,
     ) -> Result<ToolOutput, ToolError> {
         let start = std::time::Instant::now();
@@ -330,7 +332,14 @@ impl CreateJobTool {
 
         // Create the container job with the pre-determined job_id.
         let _token = jm
-            .create_job(job_id, task, Some(project_dir), mode, credential_grants)
+            .create_job(
+                job_id,
+                task,
+                Some(project_dir),
+                mode,
+                credential_grants,
+                overrides,
+            )
             .await
             .map_err(|e| {
                 self.update_status(
@@ -683,6 +692,32 @@ impl Tool for CreateJobTool {
                                         secrets store (via 'ironclaw tool auth' or web UI). Example: \
                                         {\"github_token\": \"GITHUB_TOKEN\", \"npm_token\": \"NPM_TOKEN\"}",
                         "additionalProperties": { "type": "string" }
+                    },
+                    "model": {
+                        "type": "string",
+                        "description": "Override the LLM model for this job. For claude_code mode: \
+                                        'sonnet', 'opus', etc. For pi_code mode: full model ID like \
+                                        'claude-sonnet-4-20250514'. Falls back to configured default."
+                    },
+                    "provider": {
+                        "type": "string",
+                        "description": "Override the LLM provider for this job (pi_code mode only). \
+                                        Supported: 'anthropic', 'openai', 'google', 'groq', 'xai'. \
+                                        Falls back to configured default.",
+                        "enum": ["anthropic", "openai", "google", "groq", "xai"]
+                    },
+                    "max_turns": {
+                        "type": "integer",
+                        "description": "Override the maximum agentic turns for this job. \
+                                        Falls back to configured default (typically 50).",
+                        "minimum": 1,
+                        "maximum": 500
+                    },
+                    "reasoning_effort": {
+                        "type": "string",
+                        "description": "Reasoning effort level for the LLM. Controls depth of thinking. \
+                                        Supported values: 'low', 'medium', 'high'.",
+                        "enum": ["low", "medium", "high"]
                     }
                 },
                 "required": ["title", "description"]
@@ -744,10 +779,38 @@ impl Tool for CreateJobTool {
             // Parse and validate credential grants
             let credential_grants = self.parse_credentials(&params, &ctx.user_id).await?;
 
+            // Parse per-job runtime dispatch overrides
+            let overrides = RuntimeDispatchOverrides {
+                provider: params
+                    .get("provider")
+                    .and_then(|v| v.as_str())
+                    .map(String::from),
+                model: params
+                    .get("model")
+                    .and_then(|v| v.as_str())
+                    .map(String::from),
+                max_turns: params
+                    .get("max_turns")
+                    .and_then(|v| v.as_u64())
+                    .map(|v| v as u32),
+                reasoning_effort: params
+                    .get("reasoning_effort")
+                    .and_then(|v| v.as_str())
+                    .map(String::from),
+            };
+
             // Combine title and description into the task prompt for the sub-agent.
             let task = format!("{}\n\n{}", title, description);
-            self.execute_sandbox(&task, explicit_dir, wait, mode, credential_grants, ctx)
-                .await
+            self.execute_sandbox(
+                &task,
+                explicit_dir,
+                wait,
+                mode,
+                credential_grants,
+                overrides,
+                ctx,
+            )
+            .await
         } else {
             self.execute_local(title, description, ctx).await
         }

@@ -45,6 +45,9 @@ pub struct ClaudeBridgeConfig {
     pub model: String,
     /// Tool patterns to auto-approve via project-level settings.json.
     pub allowed_tools: Vec<String>,
+    /// Optional reasoning effort level (e.g. "low", "medium", "high").
+    /// Passed as `--reasoning-effort` to the `claude` CLI.
+    pub reasoning_effort: Option<String>,
 }
 
 /// A Claude Code streaming event (NDJSON line from `--output-format stream-json`).
@@ -356,6 +359,10 @@ impl ClaudeBridgeRuntime {
             .arg(self.config.max_turns.to_string())
             .arg("--model")
             .arg(&self.config.model);
+
+        if let Some(ref effort) = self.config.reasoning_effort {
+            cmd.arg("--reasoning-effort").arg(effort);
+        }
 
         if let Some(sid) = resume_session_id {
             cmd.arg("--resume").arg(sid);

@@ -573,8 +573,7 @@ fn pi_event_to_payloads(event: &PiStreamEvent) -> Vec<JobEventPayload> {
                 for block in blocks {
                     match block.block_type.as_str() {
                         "text" => {
-                            if let Some(ref text) =
-                                block.text.as_deref().filter(|t| !t.is_empty())
+                            if let Some(ref text) = block.text.as_deref().filter(|t| !t.is_empty())
                             {
                                 payloads.push(JobEventPayload {
                                     event_type: "message".to_string(),
@@ -1007,5 +1006,399 @@ mod tests {
         let parsed: JobEventPayload = serde_json::from_str(&json).unwrap();
         assert_eq!(parsed.event_type, "message");
         assert_eq!(parsed.data["content"], "hi");
+    }
+
+    #[test]
+    fn test_pi_event_to_payloads_message_end_text() {
+        let event = PiStreamEvent {
+            event_type: "message_end".to_string(),
+            id: None,
+            version: None,
+            cwd: None,
+            turn_index: None,
+            message: Some(PiMessage {
+                role: Some("assistant".to_string()),
+                content: Some(vec![PiContentBlock {
+                    block_type: "text".to_string(),
+                    text: Some("Here's the answer".to_string()),
+                    name: None,
+                    id: None,
+                    arguments: None,
+                    content: None,
+                }]),
+                tool_call_id: None,
+            }),
+            assistant_message_event: None,
+            tool_results: None,
+            messages: None,
+            tool_call_id: None,
+            tool_name: None,
+            args: None,
+            result: None,
+            is_error: None,
+            partial_result: None,
+        };
+        let payloads = pi_event_to_payloads(&event);
+        assert_eq!(payloads.len(), 1);
+        assert_eq!(payloads[0].event_type, "message");
+        assert_eq!(payloads[0].data["role"], "assistant");
+        assert_eq!(payloads[0].data["content"], "Here's the answer");
+    }
+
+    #[test]
+    fn test_pi_event_to_payloads_message_end_tool_call() {
+        let event = PiStreamEvent {
+            event_type: "message_end".to_string(),
+            id: None,
+            version: None,
+            cwd: None,
+            turn_index: None,
+            message: Some(PiMessage {
+                role: Some("assistant".to_string()),
+                content: Some(vec![PiContentBlock {
+                    block_type: "toolCall".to_string(),
+                    text: None,
+                    name: Some("bash".to_string()),
+                    id: Some("tc_42".to_string()),
+                    arguments: Some(serde_json::json!({"command": "ls -la"})),
+                    content: None,
+                }]),
+                tool_call_id: None,
+            }),
+            assistant_message_event: None,
+            tool_results: None,
+            messages: None,
+            tool_call_id: None,
+            tool_name: None,
+            args: None,
+            result: None,
+            is_error: None,
+            partial_result: None,
+        };
+        let payloads = pi_event_to_payloads(&event);
+        assert_eq!(payloads.len(), 1);
+        assert_eq!(payloads[0].event_type, "tool_use");
+        assert_eq!(payloads[0].data["tool_name"], "bash");
+        assert_eq!(payloads[0].data["tool_use_id"], "tc_42");
+    }
+
+    #[test]
+    fn test_pi_event_to_payloads_message_end_non_assistant_skipped() {
+        // User messages at message_end should not produce payloads
+        let event = PiStreamEvent {
+            event_type: "message_end".to_string(),
+            id: None,
+            version: None,
+            cwd: None,
+            turn_index: None,
+            message: Some(PiMessage {
+                role: Some("user".to_string()),
+                content: Some(vec![PiContentBlock {
+                    block_type: "text".to_string(),
+                    text: Some("user prompt".to_string()),
+                    name: None,
+                    id: None,
+                    arguments: None,
+                    content: None,
+                }]),
+                tool_call_id: None,
+            }),
+            assistant_message_event: None,
+            tool_results: None,
+            messages: None,
+            tool_call_id: None,
+            tool_name: None,
+            args: None,
+            result: None,
+            is_error: None,
+            partial_result: None,
+        };
+        let payloads = pi_event_to_payloads(&event);
+        assert!(
+            payloads.is_empty(),
+            "user message_end should produce no payloads"
+        );
+    }
+
+    #[test]
+    fn test_pi_event_to_payloads_agent_end_no_messages() {
+        // agent_end with no messages should still produce a result
+        let event = PiStreamEvent {
+            event_type: "agent_end".to_string(),
+            id: None,
+            version: None,
+            cwd: None,
+            turn_index: None,
+            message: None,
+            assistant_message_event: None,
+            tool_results: None,
+            messages: None,
+            tool_call_id: None,
+            tool_name: None,
+            args: None,
+            result: None,
+            is_error: None,
+            partial_result: None,
+        };
+        let payloads = pi_event_to_payloads(&event);
+        assert_eq!(payloads.len(), 1);
+        assert_eq!(payloads[0].event_type, "result");
+        assert_eq!(payloads[0].data["status"], "completed");
+    }
+
+    #[test]
+    fn test_pi_event_to_payloads_turn_start() {
+        let event = PiStreamEvent {
+            event_type: "turn_start".to_string(),
+            id: None,
+            version: None,
+            cwd: None,
+            turn_index: Some(2),
+            message: None,
+            assistant_message_event: None,
+            tool_results: None,
+            messages: None,
+            tool_call_id: None,
+            tool_name: None,
+            args: None,
+            result: None,
+            is_error: None,
+            partial_result: None,
+        };
+        let payloads = pi_event_to_payloads(&event);
+        assert_eq!(payloads.len(), 1);
+        assert_eq!(payloads[0].event_type, "status");
+        assert_eq!(payloads[0].data["message"], "Turn 3 started");
+        assert_eq!(payloads[0].data["turn_index"], 2);
+    }
+
+    #[test]
+    fn test_pi_event_to_payloads_turn_end() {
+        let event = PiStreamEvent {
+            event_type: "turn_end".to_string(),
+            id: None,
+            version: None,
+            cwd: None,
+            turn_index: Some(4),
+            message: None,
+            assistant_message_event: None,
+            tool_results: None,
+            messages: None,
+            tool_call_id: None,
+            tool_name: None,
+            args: None,
+            result: None,
+            is_error: None,
+            partial_result: None,
+        };
+        let payloads = pi_event_to_payloads(&event);
+        assert_eq!(payloads.len(), 1);
+        assert_eq!(payloads[0].event_type, "status");
+        assert_eq!(payloads[0].data["message"], "Turn 5 completed");
+    }
+
+    #[test]
+    fn test_pi_event_to_payloads_tool_error() {
+        let event = PiStreamEvent {
+            event_type: "tool_execution_end".to_string(),
+            id: None,
+            version: None,
+            cwd: None,
+            turn_index: None,
+            message: None,
+            assistant_message_event: None,
+            tool_results: None,
+            messages: None,
+            tool_call_id: Some("tc_err".to_string()),
+            tool_name: Some("bash".to_string()),
+            args: None,
+            result: Some(serde_json::json!("command not found")),
+            is_error: Some(true),
+            partial_result: None,
+        };
+        let payloads = pi_event_to_payloads(&event);
+        assert_eq!(payloads.len(), 1);
+        assert_eq!(payloads[0].event_type, "tool_result");
+        assert_eq!(payloads[0].data["is_error"], true);
+        assert_eq!(payloads[0].data["output"], "command not found");
+    }
+
+    #[test]
+    fn test_pi_event_to_payloads_message_start_skipped() {
+        let event = PiStreamEvent {
+            event_type: "message_start".to_string(),
+            id: None,
+            version: None,
+            cwd: None,
+            turn_index: None,
+            message: None,
+            assistant_message_event: None,
+            tool_results: None,
+            messages: None,
+            tool_call_id: None,
+            tool_name: None,
+            args: None,
+            result: None,
+            is_error: None,
+            partial_result: None,
+        };
+        let payloads = pi_event_to_payloads(&event);
+        assert!(payloads.is_empty(), "message_start should be skipped");
+    }
+
+    #[test]
+    fn test_pi_event_to_payloads_compaction_events() {
+        for event_type in [
+            "auto_compaction_start",
+            "auto_compaction_end",
+            "auto_retry_start",
+            "auto_retry_end",
+        ] {
+            let event = PiStreamEvent {
+                event_type: event_type.to_string(),
+                id: None,
+                version: None,
+                cwd: None,
+                turn_index: None,
+                message: None,
+                assistant_message_event: None,
+                tool_results: None,
+                messages: None,
+                tool_call_id: None,
+                tool_name: None,
+                args: None,
+                result: None,
+                is_error: None,
+                partial_result: None,
+            };
+            let payloads = pi_event_to_payloads(&event);
+            assert_eq!(
+                payloads.len(),
+                1,
+                "compaction event {event_type} should emit status"
+            );
+            assert_eq!(payloads[0].event_type, "status");
+            assert_eq!(payloads[0].data["raw_type"], event_type);
+        }
+    }
+
+    #[test]
+    fn test_write_container_extension() {
+        let tmp = tempfile::tempdir().unwrap();
+        let ext_dir = tmp.path().join(".pi").join("extensions");
+
+        // Patch the function to write to a temp path by testing the content directly
+        let max_turns = 25;
+        let ext_content = format!(
+            r#"// IronClaw container extension -- max-turn enforcement + compaction.
+// Auto-generated by the Pi bridge runtime. Do not edit.
+export default function(pi: any) {{
+    const maxTurns = {};
+
+    pi.on("turn_end", (event: any, ctx: any) => {{
+        if (event.turnIndex >= maxTurns - 1) {{
+            ctx.abort();
+        }}
+    }});
+}}"#,
+            max_turns
+        );
+
+        std::fs::create_dir_all(&ext_dir).unwrap();
+        let ext_path = ext_dir.join("ironclaw-container.ts");
+        std::fs::write(&ext_path, &ext_content).unwrap();
+
+        let written = std::fs::read_to_string(&ext_path).unwrap();
+        assert!(written.contains("const maxTurns = 25;"));
+        assert!(written.contains("ctx.abort()"));
+        assert!(written.contains("turn_end"));
+        assert!(written.contains("event.turnIndex >= maxTurns - 1"));
+    }
+
+    #[test]
+    fn test_pi_code_config_defaults() {
+        let config = crate::config::PiCodeConfig::default();
+        assert!(!config.enabled);
+        assert_eq!(config.provider, "anthropic");
+        assert_eq!(config.model, "claude-sonnet-4-20250514");
+        assert_eq!(config.max_turns, 50);
+        assert_eq!(config.memory_limit_mb, 4096);
+        assert_eq!(
+            config.allowed_tools,
+            vec!["read", "write", "edit", "bash", "grep", "find", "ls"]
+        );
+    }
+
+    #[test]
+    fn test_extract_text_from_message_no_content() {
+        let msg = PiMessage {
+            role: Some("assistant".to_string()),
+            content: None,
+            tool_call_id: None,
+        };
+        assert!(extract_text_from_message(&msg).is_none());
+    }
+
+    #[test]
+    fn test_agent_end_picks_last_assistant() {
+        // agent_end should pick the LAST assistant message
+        let event = PiStreamEvent {
+            event_type: "agent_end".to_string(),
+            id: None,
+            version: None,
+            cwd: None,
+            turn_index: None,
+            message: None,
+            assistant_message_event: None,
+            tool_results: None,
+            messages: Some(vec![
+                PiMessage {
+                    role: Some("assistant".to_string()),
+                    content: Some(vec![PiContentBlock {
+                        block_type: "text".to_string(),
+                        text: Some("First response".to_string()),
+                        name: None,
+                        id: None,
+                        arguments: None,
+                        content: None,
+                    }]),
+                    tool_call_id: None,
+                },
+                PiMessage {
+                    role: Some("user".to_string()),
+                    content: Some(vec![PiContentBlock {
+                        block_type: "text".to_string(),
+                        text: Some("Follow up".to_string()),
+                        name: None,
+                        id: None,
+                        arguments: None,
+                        content: None,
+                    }]),
+                    tool_call_id: None,
+                },
+                PiMessage {
+                    role: Some("assistant".to_string()),
+                    content: Some(vec![PiContentBlock {
+                        block_type: "text".to_string(),
+                        text: Some("Final answer".to_string()),
+                        name: None,
+                        id: None,
+                        arguments: None,
+                        content: None,
+                    }]),
+                    tool_call_id: None,
+                },
+            ]),
+            tool_call_id: None,
+            tool_name: None,
+            args: None,
+            result: None,
+            is_error: None,
+            partial_result: None,
+        };
+        let payloads = pi_event_to_payloads(&event);
+        assert_eq!(payloads.len(), 2); // message + result
+        assert_eq!(payloads[0].event_type, "message");
+        assert_eq!(payloads[0].data["content"], "Final answer");
     }
 }

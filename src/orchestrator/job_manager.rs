@@ -379,7 +379,16 @@ impl ContainerJobManager {
                 "google" | "gemini" => "GEMINI_API_KEY",
                 "groq" => "GROQ_API_KEY",
                 "xai" => "XAI_API_KEY",
-                _ => "ANTHROPIC_API_KEY",
+                other => {
+                    return Err(OrchestratorError::ContainerCreationFailed {
+                        job_id,
+                        reason: format!(
+                            "Unknown PI_CODE_PROVIDER '{}'. \
+                             Supported: anthropic, openai, google, gemini, groq, xai",
+                            other
+                        ),
+                    });
+                }
             };
             if let Ok(key) = std::env::var(provider_env_key) {
                 env_vec.push(format!("{}={}", provider_env_key, key));

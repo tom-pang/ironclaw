@@ -41,7 +41,6 @@ pub struct PiBridgeConfig {
     pub max_turns: u32,
     pub provider: String,
     pub model: String,
-    pub timeout: Duration,
     /// Tool names to enable via `--tools` (e.g. `["read", "write", "edit", "bash"]`).
     pub allowed_tools: Vec<String>,
 }
@@ -272,9 +271,9 @@ export default function(pi: any) {{
             })
             .await?;
 
-        // Run the initial Pi session
+        // Run the initial Pi session (creates a session file for follow-ups)
         let result = self
-            .run_pi_session(&job.description, &ext_path, &extra_env)
+            .run_pi_session(&job.description, &ext_path, &extra_env, false)
             .await;
 
         match result {
@@ -304,10 +303,10 @@ export default function(pi: any) {{
                     iteration += 1;
                     tracing::info!(
                         job_id = %self.config.job_id,
-                        "Got follow-up prompt, starting new Pi session"
+                        "Got follow-up prompt, resuming Pi session"
                     );
                     if let Err(e) = self
-                        .run_pi_session(&prompt.content, &ext_path, &extra_env)
+                        .run_pi_session(&prompt.content, &ext_path, &extra_env, true)
                         .await
                     {
                         tracing::error!(
@@ -348,16 +347,20 @@ export default function(pi: any) {{
     }
 
     /// Spawn a `pi` CLI process in JSON streaming mode and stream its output.
+    ///
+    /// On the initial run (`is_follow_up = false`) Pi creates a session file
+    /// under `/workspace/.pi/sessions/`.  Follow-up runs pass `--continue` so
+    /// Pi loads that session and the new prompt has full conversation history.
     async fn run_pi_session(
         &self,
         prompt: &str,
         ext_path: &std::path::Path,
         extra_env: &std::collections::HashMap<String, String>,
+        is_follow_up: bool,
     ) -> Result<(), WorkerError> {
         let mut cmd = Command::new("pi");
         cmd.arg("--mode")
             .arg("json")
-            .arg("--no-session")
             .arg("--no-extensions")
             .arg("--no-skills")
             .arg("--no-prompt-templates")
@@ -366,6 +369,13 @@ export default function(pi: any) {{
             .arg(ext_path)
             .arg("--model")
             .arg(format!("{}/{}", self.config.provider, self.config.model));
+
+        // Follow-up prompts resume the previous session so Pi has full
+        // conversation context.  The initial run creates a session file;
+        // `--continue` loads the most recent one.
+        if is_follow_up {
+            cmd.arg("--continue");
+        }
 
         // Restrict tools if configured
         if !self.config.allowed_tools.is_empty() {

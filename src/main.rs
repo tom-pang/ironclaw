@@ -763,7 +763,6 @@ async fn run_claude_bridge(
         orchestrator_url: orchestrator_url.to_string(),
         max_turns,
         model: model.to_string(),
-        timeout: std::time::Duration::from_secs(1800),
         allowed_tools: ironclaw::config::ClaudeCodeConfig::from_env().allowed_tools,
     };
 
@@ -800,7 +799,6 @@ async fn run_pi_bridge(
         max_turns,
         provider: provider.to_string(),
         model: model.to_string(),
-        timeout: std::time::Duration::from_secs(1800),
         allowed_tools: pi_config.allowed_tools,
     };
 

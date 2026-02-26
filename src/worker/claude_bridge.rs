@@ -43,7 +43,6 @@ pub struct ClaudeBridgeConfig {
     pub orchestrator_url: String,
     pub max_turns: u32,
     pub model: String,
-    pub timeout: Duration,
     /// Tool patterns to auto-approve via project-level settings.json.
     pub allowed_tools: Vec<String>,
 }

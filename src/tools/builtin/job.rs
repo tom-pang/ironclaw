@@ -1344,6 +1344,58 @@ impl Tool for JobPromptTool {
     }
 }
 
+/// Tool that exposes configured sandbox runtime information (models, providers,
+/// defaults) so the agent can make informed decisions when dispatching jobs.
+pub struct SandboxInfoTool {
+    job_manager: Arc<ContainerJobManager>,
+}
+
+impl SandboxInfoTool {
+    pub fn new(job_manager: Arc<ContainerJobManager>) -> Self {
+        Self { job_manager }
+    }
+}
+
+#[async_trait]
+impl Tool for SandboxInfoTool {
+    fn name(&self) -> &str {
+        "sandbox_info"
+    }
+
+    fn description(&self) -> &str {
+        "Show available sandbox execution runtimes, their configured default models, \
+         providers, and capabilities. Call this before create_job to discover which \
+         models and providers are available for sandbox jobs."
+    }
+
+    fn parameters_schema(&self) -> serde_json::Value {
+        serde_json::json!({
+            "type": "object",
+            "properties": {},
+            "required": []
+        })
+    }
+
+    async fn execute(
+        &self,
+        _params: serde_json::Value,
+        _ctx: &JobContext,
+    ) -> Result<ToolOutput, ToolError> {
+        let start = std::time::Instant::now();
+        let info = self.job_manager.runtime_info();
+
+        let output = serde_json::to_string_pretty(&info).map_err(|e| {
+            ToolError::ExecutionFailed(format!("failed to serialize runtime info: {e}"))
+        })?;
+
+        Ok(ToolOutput::text(output, start.elapsed()))
+    }
+
+    fn requires_sanitization(&self) -> bool {
+        false
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

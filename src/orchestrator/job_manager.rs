@@ -238,6 +238,24 @@ fn validate_bind_mount_path(
     Ok(canonical)
 }
 
+/// Summary of a single sandbox runtime mode's configuration.
+#[derive(Debug, Clone, serde::Serialize)]
+pub struct RuntimeModeInfo {
+    pub default_model: String,
+    pub default_provider: String,
+    pub max_turns: u32,
+    pub has_credentials: bool,
+}
+
+/// Summary of all sandbox runtime configuration, returned by
+/// [`ContainerJobManager::runtime_info`].
+#[derive(Debug, Clone, serde::Serialize)]
+pub struct SandboxRuntimeInfo {
+    pub sandbox_image: String,
+    pub claude_code: RuntimeModeInfo,
+    pub pi_code: RuntimeModeInfo,
+}
+
 /// Manages the lifecycle of Docker containers for sandboxed job execution.
 pub struct ContainerJobManager {
     config: ContainerJobConfig,
@@ -254,6 +272,27 @@ impl ContainerJobManager {
             token_store,
             containers: Arc::new(RwLock::new(HashMap::new())),
             docker: Arc::new(RwLock::new(None)),
+        }
+    }
+
+    /// Return the configured sandbox runtime information for introspection.
+    pub fn runtime_info(&self) -> SandboxRuntimeInfo {
+        SandboxRuntimeInfo {
+            sandbox_image: self.config.image.clone(),
+            claude_code: RuntimeModeInfo {
+                default_model: self.config.claude_code_model.clone(),
+                default_provider: "anthropic".to_string(),
+                max_turns: self.config.claude_code_max_turns,
+                has_credentials: self.config.claude_code_api_key.is_some()
+                    || self.config.claude_code_oauth_token.is_some(),
+            },
+            pi_code: RuntimeModeInfo {
+                default_model: self.config.pi_code_model.clone(),
+                default_provider: self.config.pi_code_provider.clone(),
+                max_turns: self.config.pi_code_max_turns,
+                has_credentials: self.config.claude_code_api_key.is_some()
+                    || self.config.claude_code_oauth_token.is_some(),
+            },
         }
     }
 

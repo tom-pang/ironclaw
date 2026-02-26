@@ -252,12 +252,40 @@ jobs:
           persist-credentials: false
           submodules: recursive
       - name: Install Rust toolchain + wasm target
+        run: rustup target add wasm32-wasip2
+      - name: Cache cargo-component binary
+        id: cache-cargo-component
+        uses: actions/cache@v4
+        with:
+          path: ${{ runner.tool_cache }}/cargo-component
+          key: cargo-component-0.21.1
+      - name: Install cargo-component
+        if: steps.cache-cargo-component.outputs.cache-hit != 'true'
         run: |
-          rustup target add wasm32-wasip2
-          cargo install cargo-component --locked || true
+          cargo install cargo-component@0.21.1 --locked
+          mkdir -p ${{ runner.tool_cache }}/cargo-component
+          cp ~/.cargo/bin/cargo-component ${{ runner.tool_cache }}/cargo-component/
+      - name: Restore cargo-component from cache
+        if: steps.cache-cargo-component.outputs.cache-hit == 'true'
+        run: cp ${{ runner.tool_cache }}/cargo-component/cargo-component ~/.cargo/bin/
       - uses: swatinem/rust-cache@v2
         with:
-          key: wasm-extensions
+          shared-key: wasm-extensions
+          workspaces: |-
+            channels-src/discord
+            channels-src/slack
+            channels-src/telegram
+            channels-src/whatsapp
+            tools-src/github
+            tools-src/gmail
+            tools-src/google-calendar
+            tools-src/google-docs
+            tools-src/google-drive
+            tools-src/google-sheets
+            tools-src/google-slides
+            tools-src/okta
+            tools-src/slack
+            tools-src/telegram
       - name: Build and package WASM extensions
         shell: bash
         run: |

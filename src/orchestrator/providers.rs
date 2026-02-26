@@ -93,9 +93,7 @@ mod tests {
     use super::*;
 
     /// Helper: build a lookup function from a set of env-var entries.
-    fn env_from<'a>(
-        entries: &'a [(&'a str, &'a str)],
-    ) -> impl Fn(&str) -> Option<String> + 'a {
+    fn env_from<'a>(entries: &'a [(&'a str, &'a str)]) -> impl Fn(&str) -> Option<String> + 'a {
         let map: HashMap<&str, &str> = entries.iter().copied().collect();
         move |key: &str| {
             map.get(key)

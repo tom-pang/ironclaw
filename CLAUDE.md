@@ -643,6 +643,28 @@ See `src/tools/README.md` for full tool architecture, adding new tools (built-in
 3. Add config in `src/config.rs`
 4. Wire up in `main.rs` channel setup section
 
+## Releasing (tom-pang fork)
+
+Binary releases are built by cargo-dist via the `.github/workflows/release.yml` workflow, triggered when a version tag is pushed to the `tom-pang/ironclaw` fork.
+
+**cargo-dist requires Cargo.toml `version` to match the git tag exactly.** If Cargo.toml says `0.12.0` but you push tag `v0.11.1-tom3`, the release will fail with exit code 255.
+
+Steps:
+
+1. Set `version` in `Cargo.toml` to match your intended tag (e.g., `"0.11.1-tom3"`)
+2. Commit the version bump
+3. Tag and push:
+   ```bash
+   jj git fetch --remote fork
+   jj bookmark set main -r @- && jj git push --bookmark main --remote fork
+   # Tag the commit (use git since jj doesn't have native tagging)
+   git tag v0.11.1-tom3 "$(jj log -r @- --no-graph -T 'commit_id')"
+   git push fork v0.11.1-tom3
+   ```
+4. Watch the release: `gh run watch --repo tom-pang/ironclaw --exit-status`
+
+The `fin-deploy` repo's Dockerfile pulls the binary from these releases via `IRONCLAW_VERSION` ARG.
+
 ## Debugging
 
 ```bash

@@ -253,9 +253,10 @@ impl Guest for SlackChannel {
             .map_err(|e| format!("Failed to serialize payload: {}", e))?;
 
         // Make HTTP request to Slack API
-        // The bot token is injected by the host based on credential configuration
+        // Host replaces {SLACK_BOT_TOKEN} with the actual token at request time
         let headers = serde_json::json!({
-            "Content-Type": "application/json"
+            "Content-Type": "application/json",
+            "Authorization": "Bearer {SLACK_BOT_TOKEN}"
         });
 
         let result = channel_host::http_request(
@@ -496,7 +497,10 @@ fn send_pairing_reply(channel_id: &str, code: &str) -> Result<(), String> {
     let payload_bytes =
         serde_json::to_vec(&payload).map_err(|e| format!("Failed to serialize: {}", e))?;
 
-    let headers = serde_json::json!({"Content-Type": "application/json"});
+    let headers = serde_json::json!({
+        "Content-Type": "application/json",
+        "Authorization": "Bearer {SLACK_BOT_TOKEN}"
+    });
 
     let result = channel_host::http_request(
         "POST",

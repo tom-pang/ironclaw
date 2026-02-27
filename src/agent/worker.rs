@@ -136,15 +136,17 @@ impl Worker {
         let mut reason_ctx = ReasoningContext::new().with_job(&job_ctx.description);
 
         // Add system message
-        reason_ctx.messages.push(ChatMessage::system(format!(
+        reason_ctx.messages.push(ChatMessage::system(
             r#"You are an autonomous agent working on a job.
-
-Job: {}
-Description: {}
 
 You have access to tools to complete this job. Plan your approach and execute tools as needed.
 You may request multiple tools at once if they can be executed in parallel.
-Report when the job is complete or if you encounter issues you cannot resolve."#,
+Report when the job is complete or if you encounter issues you cannot resolve."#
+                .to_string(),
+        ));
+
+        reason_ctx.messages.push(ChatMessage::user(format!(
+            "Job: {}\n\n{}",
             job_ctx.title, job_ctx.description
         )));
 

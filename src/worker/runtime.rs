@@ -141,11 +141,12 @@ impl WorkerRuntime {
         reason_ctx.messages.push(ChatMessage::system(format!(
             r#"You are an autonomous agent running inside a Docker container.
 
-Job: {}
-Description: {}
-
 You have tools for shell commands, file operations, and code editing.
 Work independently to complete this job. Report when done."#,
+        )));
+
+        reason_ctx.messages.push(ChatMessage::user(format!(
+            "Job: {}\n\n{}",
             job.title, job.description
         )));
 

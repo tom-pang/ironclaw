@@ -228,6 +228,86 @@ impl ClaudeCodeConfig {
     }
 }
 
+/// Pi coding agent sandbox configuration.
+#[derive(Debug, Clone)]
+pub struct PiCodeConfig {
+    /// Whether Pi coding agent sandbox mode is available.
+    pub enabled: bool,
+    /// LLM provider to use (e.g. "anthropic", "openai").
+    pub provider: String,
+    /// Model ID to use (e.g. "claude-sonnet-4-20250514").
+    pub model: String,
+    /// Maximum agentic turns before stopping.
+    pub max_turns: u32,
+    /// Memory limit in MB for Pi containers.
+    pub memory_limit_mb: u64,
+    /// Allowed tool names for Pi (passed as PI_CODE_ALLOWED_TOOLS env var).
+    ///
+    /// Pi uses `--tools <list>` to restrict available tools. These follow Pi's
+    /// tool naming: `read`, `write`, `edit`, `bash`, `grep`, `find`, `ls`.
+    pub allowed_tools: Vec<String>,
+}
+
+/// Default allowed tools for Pi inside containers.
+///
+/// Pi's built-in tools for autonomous coding. The Docker container provides
+/// the primary security boundary; Pi has no built-in permission system by
+/// design.
+fn default_pi_code_allowed_tools() -> Vec<String> {
+    ["read", "write", "edit", "bash", "grep", "find", "ls"]
+        .into_iter()
+        .map(String::from)
+        .collect()
+}
+
+impl Default for PiCodeConfig {
+    fn default() -> Self {
+        Self {
+            enabled: false,
+            provider: "anthropic".to_string(),
+            model: "claude-sonnet-4-20250514".to_string(),
+            max_turns: 50,
+            memory_limit_mb: 4096,
+            allowed_tools: default_pi_code_allowed_tools(),
+        }
+    }
+}
+
+impl PiCodeConfig {
+    /// Load from environment variables only (used inside containers).
+    pub fn from_env() -> Self {
+        match Self::resolve() {
+            Ok(c) => c,
+            Err(e) => {
+                tracing::warn!("Failed to resolve PiCodeConfig: {e}, using defaults");
+                Self::default()
+            }
+        }
+    }
+
+    pub(crate) fn resolve() -> Result<Self, ConfigError> {
+        let defaults = Self::default();
+        Ok(Self {
+            enabled: parse_bool_env("PI_CODE_ENABLED", defaults.enabled)?,
+            provider: parse_string_env("PI_CODE_PROVIDER", defaults.provider)?,
+            model: parse_string_env("PI_CODE_MODEL", defaults.model)?,
+            max_turns: parse_optional_env("PI_CODE_MAX_TURNS", defaults.max_turns)?,
+            memory_limit_mb: parse_optional_env(
+                "PI_CODE_MEMORY_LIMIT_MB",
+                defaults.memory_limit_mb,
+            )?,
+            allowed_tools: optional_env("PI_CODE_ALLOWED_TOOLS")?
+                .map(|s| {
+                    s.split(',')
+                        .map(|t| t.trim().to_string())
+                        .filter(|t| !t.is_empty())
+                        .collect()
+                })
+                .unwrap_or(defaults.allowed_tools),
+        })
+    }
+}
+
 /// Parse the OAuth access token from a Claude Code credentials JSON blob.
 ///
 /// Expected shape: `{"claudeAiOauth": {"accessToken": "sk-ant-oat01-..."}}`

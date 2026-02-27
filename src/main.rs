@@ -111,6 +111,16 @@ async fn main() -> anyhow::Result<()> {
             init_worker_tracing();
             return run_claude_bridge(*job_id, orchestrator_url, *max_turns, model).await;
         }
+        Some(Command::PiBridge {
+            job_id,
+            orchestrator_url,
+            max_turns,
+            provider,
+            model,
+        }) => {
+            init_worker_tracing();
+            return run_pi_bridge(*job_id, orchestrator_url, *max_turns, provider, model).await;
+        }
         Some(Command::Onboard {
             skip_auth,
             channels_only,
@@ -259,52 +269,66 @@ async fn main() -> anyhow::Result<()> {
         std::collections::VecDeque<ironclaw::orchestrator::api::PendingPrompt>,
     >::new()));
 
-    let container_job_manager: Option<Arc<ContainerJobManager>> =
-        if config.sandbox.enabled && docker_status.is_ok() {
-            let token_store = TokenStore::new();
-            let job_config = ContainerJobConfig {
-                image: config.sandbox.image.clone(),
-                memory_limit_mb: config.sandbox.memory_limit_mb,
-                cpu_shares: config.sandbox.cpu_shares,
-                orchestrator_port: 50051,
-                claude_code_api_key: std::env::var("ANTHROPIC_API_KEY").ok(),
-                claude_code_oauth_token: ironclaw::config::ClaudeCodeConfig::extract_oauth_token(),
-                claude_code_model: config.claude_code.model.clone(),
-                claude_code_max_turns: config.claude_code.max_turns,
-                claude_code_memory_limit_mb: config.claude_code.memory_limit_mb,
-                claude_code_allowed_tools: config.claude_code.allowed_tools.clone(),
-            };
-            let jm = Arc::new(ContainerJobManager::new(job_config, token_store.clone()));
-
-            // Start the orchestrator internal API in the background
-            let orchestrator_state = OrchestratorState {
-                llm: components.llm.clone(),
-                job_manager: Arc::clone(&jm),
-                token_store,
-                job_event_tx: job_event_tx.clone(),
-                prompt_queue: Arc::clone(&prompt_queue),
-                store: components.db.clone(),
-                secrets_store: components.secrets_store.clone(),
-                user_id: "default".to_string(),
-            };
-
-            tokio::spawn(async move {
-                if let Err(e) = OrchestratorApi::start(orchestrator_state, 50051).await {
-                    tracing::error!("Orchestrator API failed: {}", e);
-                }
-            });
-
-            if config.claude_code.enabled {
-                tracing::info!(
-                    "Claude Code sandbox mode available (model: {}, max_turns: {})",
-                    config.claude_code.model,
-                    config.claude_code.max_turns
-                );
-            }
-            Some(jm)
-        } else {
-            None
+    let container_job_manager: Option<Arc<ContainerJobManager>> = if config.sandbox.enabled
+        && docker_status.is_ok()
+    {
+        let token_store = TokenStore::new();
+        let job_config = ContainerJobConfig {
+            image: config.sandbox.image.clone(),
+            memory_limit_mb: config.sandbox.memory_limit_mb,
+            cpu_shares: config.sandbox.cpu_shares,
+            orchestrator_port: 50051,
+            claude_code_api_key: std::env::var("ANTHROPIC_API_KEY").ok(),
+            claude_code_oauth_token: ironclaw::config::ClaudeCodeConfig::extract_oauth_token(),
+            claude_code_model: config.claude_code.model.clone(),
+            claude_code_max_turns: config.claude_code.max_turns,
+            claude_code_memory_limit_mb: config.claude_code.memory_limit_mb,
+            claude_code_allowed_tools: config.claude_code.allowed_tools.clone(),
+            pi_code_provider: config.pi_code.provider.clone(),
+            pi_code_model: config.pi_code.model.clone(),
+            pi_code_max_turns: config.pi_code.max_turns,
+            pi_code_memory_limit_mb: config.pi_code.memory_limit_mb,
+            pi_code_allowed_tools: config.pi_code.allowed_tools.clone(),
         };
+        let jm = Arc::new(ContainerJobManager::new(job_config, token_store.clone()));
+
+        // Start the orchestrator internal API in the background
+        let orchestrator_state = OrchestratorState {
+            llm: components.llm.clone(),
+            job_manager: Arc::clone(&jm),
+            token_store,
+            job_event_tx: job_event_tx.clone(),
+            prompt_queue: Arc::clone(&prompt_queue),
+            store: components.db.clone(),
+            secrets_store: components.secrets_store.clone(),
+            user_id: "default".to_string(),
+        };
+
+        tokio::spawn(async move {
+            if let Err(e) = OrchestratorApi::start(orchestrator_state, 50051).await {
+                tracing::error!("Orchestrator API failed: {}", e);
+            }
+        });
+
+        if config.claude_code.enabled {
+            tracing::info!(
+                "Claude Code sandbox mode available (model: {}, max_turns: {})",
+                config.claude_code.model,
+                config.claude_code.max_turns
+            );
+        }
+        if config.pi_code.enabled {
+            tracing::info!(
+                "Pi coding agent sandbox mode available (provider: {}, model: {}, max_turns: {})",
+                config.pi_code.provider,
+                config.pi_code.model,
+                config.pi_code.max_turns
+            );
+        }
+        Some(jm)
+    } else {
+        None
+    };
 
     // ── Channel setup ──────────────────────────────────────────────────
 
@@ -565,6 +589,7 @@ async fn main() -> anyhow::Result<()> {
             sandbox_enabled: config.sandbox.enabled,
             docker_status,
             claude_code_enabled: config.claude_code.enabled,
+            pi_code_enabled: config.pi_code.enabled,
             routines_enabled: config.routines.enabled,
             skills_enabled: config.skills.enabled,
             channels: channel_names,
@@ -738,7 +763,6 @@ async fn run_claude_bridge(
         orchestrator_url: orchestrator_url.to_string(),
         max_turns,
         model: model.to_string(),
-        timeout: std::time::Duration::from_secs(1800),
         allowed_tools: ironclaw::config::ClaudeCodeConfig::from_env().allowed_tools,
     };
 
@@ -749,6 +773,42 @@ async fn run_claude_bridge(
         .run()
         .await
         .map_err(|e| anyhow::anyhow!("Claude bridge failed: {}", e))
+}
+
+/// Run the Pi coding agent bridge subcommand (inside Docker containers).
+async fn run_pi_bridge(
+    job_id: uuid::Uuid,
+    orchestrator_url: &str,
+    max_turns: u32,
+    provider: &str,
+    model: &str,
+) -> anyhow::Result<()> {
+    tracing::info!(
+        "Starting Pi bridge for job {} (orchestrator: {}, provider: {}, model: {})",
+        job_id,
+        orchestrator_url,
+        provider,
+        model
+    );
+
+    let pi_config = ironclaw::config::PiCodeConfig::from_env();
+
+    let config = ironclaw::worker::pi_bridge::PiBridgeConfig {
+        job_id,
+        orchestrator_url: orchestrator_url.to_string(),
+        max_turns,
+        provider: provider.to_string(),
+        model: model.to_string(),
+        allowed_tools: pi_config.allowed_tools,
+    };
+
+    let runtime = ironclaw::worker::PiBridgeRuntime::new(config)
+        .map_err(|e| anyhow::anyhow!("Pi bridge init failed: {}", e))?;
+
+    runtime
+        .run()
+        .await
+        .map_err(|e| anyhow::anyhow!("Pi bridge failed: {}", e))
 }
 
 /// Start managed tunnel if configured and no static URL is already set.

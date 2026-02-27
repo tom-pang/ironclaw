@@ -22,6 +22,8 @@ pub enum JobMode {
     Worker,
     /// Claude Code bridge that spawns the `claude` CLI directly.
     ClaudeCode,
+    /// Pi coding agent bridge that spawns the `pi` CLI directly.
+    PiCode,
 }
 
 impl JobMode {
@@ -29,6 +31,7 @@ impl JobMode {
         match self {
             Self::Worker => "worker",
             Self::ClaudeCode => "claude_code",
+            Self::PiCode => "pi_code",
         }
     }
 }
@@ -65,6 +68,16 @@ pub struct ContainerJobConfig {
     pub claude_code_memory_limit_mb: u64,
     /// Allowed tool patterns for Claude Code (passed as CLAUDE_CODE_ALLOWED_TOOLS env var).
     pub claude_code_allowed_tools: Vec<String>,
+    /// LLM provider for Pi containers (e.g. "anthropic", "openai").
+    pub pi_code_provider: String,
+    /// Model ID for Pi containers (e.g. "claude-sonnet-4-20250514").
+    pub pi_code_model: String,
+    /// Maximum turns for Pi coding agent.
+    pub pi_code_max_turns: u32,
+    /// Memory limit in MB for Pi containers.
+    pub pi_code_memory_limit_mb: u64,
+    /// Allowed tool names for Pi (passed as PI_CODE_ALLOWED_TOOLS env var).
+    pub pi_code_allowed_tools: Vec<String>,
 }
 
 impl Default for ContainerJobConfig {
@@ -80,6 +93,11 @@ impl Default for ContainerJobConfig {
             claude_code_max_turns: 50,
             claude_code_memory_limit_mb: 4096,
             claude_code_allowed_tools: crate::config::ClaudeCodeConfig::default().allowed_tools,
+            pi_code_provider: crate::config::PiCodeConfig::default().provider,
+            pi_code_model: crate::config::PiCodeConfig::default().model,
+            pi_code_max_turns: 50,
+            pi_code_memory_limit_mb: 4096,
+            pi_code_allowed_tools: crate::config::PiCodeConfig::default().allowed_tools,
         }
     }
 }
@@ -347,9 +365,46 @@ impl ContainerJobManager {
             }
         }
 
-        // Memory limit: Claude Code gets more memory
+        // Pi Code mode: inject API key for the configured provider.
+        //
+        // Pi reads standard env vars per provider (ANTHROPIC_API_KEY,
+        // OPENAI_API_KEY, etc.). We inject whichever key matches the
+        // configured provider. The bridge also receives the allowed tools
+        // list for `--tools` restriction.
+        if mode == JobMode::PiCode {
+            // Inject API key based on configured provider
+            let provider_env_key = match self.config.pi_code_provider.as_str() {
+                "anthropic" => "ANTHROPIC_API_KEY",
+                "openai" => "OPENAI_API_KEY",
+                "google" | "gemini" => "GEMINI_API_KEY",
+                "groq" => "GROQ_API_KEY",
+                "xai" => "XAI_API_KEY",
+                other => {
+                    return Err(OrchestratorError::ContainerCreationFailed {
+                        job_id,
+                        reason: format!(
+                            "Unknown PI_CODE_PROVIDER '{}'. \
+                             Supported: anthropic, openai, google, gemini, groq, xai",
+                            other
+                        ),
+                    });
+                }
+            };
+            if let Ok(key) = std::env::var(provider_env_key) {
+                env_vec.push(format!("{}={}", provider_env_key, key));
+            }
+            if !self.config.pi_code_allowed_tools.is_empty() {
+                env_vec.push(format!(
+                    "PI_CODE_ALLOWED_TOOLS={}",
+                    self.config.pi_code_allowed_tools.join(",")
+                ));
+            }
+        }
+
+        // Memory limit: coding agents get more memory than standard workers
         let memory_mb = match mode {
             JobMode::ClaudeCode => self.config.claude_code_memory_limit_mb,
+            JobMode::PiCode => self.config.pi_code_memory_limit_mb,
             JobMode::Worker => self.config.memory_limit_mb,
         };
 
@@ -381,18 +436,31 @@ impl ContainerJobManager {
                 "--job-id".to_string(),
                 job_id.to_string(),
                 "--orchestrator-url".to_string(),
-                orchestrator_url,
+                orchestrator_url.clone(),
             ],
             JobMode::ClaudeCode => vec![
                 "claude-bridge".to_string(),
                 "--job-id".to_string(),
                 job_id.to_string(),
                 "--orchestrator-url".to_string(),
-                orchestrator_url,
+                orchestrator_url.clone(),
                 "--max-turns".to_string(),
                 self.config.claude_code_max_turns.to_string(),
                 "--model".to_string(),
                 self.config.claude_code_model.clone(),
+            ],
+            JobMode::PiCode => vec![
+                "pi-bridge".to_string(),
+                "--job-id".to_string(),
+                job_id.to_string(),
+                "--orchestrator-url".to_string(),
+                orchestrator_url.clone(),
+                "--max-turns".to_string(),
+                self.config.pi_code_max_turns.to_string(),
+                "--provider".to_string(),
+                self.config.pi_code_provider.clone(),
+                "--model".to_string(),
+                self.config.pi_code_model.clone(),
             ],
         };
 
@@ -409,6 +477,7 @@ impl ContainerJobManager {
         let container_name = match mode {
             JobMode::Worker => format!("ironclaw-worker-{}", job_id),
             JobMode::ClaudeCode => format!("ironclaw-claude-{}", job_id),
+            JobMode::PiCode => format!("ironclaw-pi-{}", job_id),
         };
         let options = CreateContainerOptions {
             name: container_name,

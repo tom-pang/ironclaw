@@ -315,20 +315,29 @@ async fn job_event_handler(
                 .unwrap_or("")
                 .to_string(),
         },
-        "result" => SseEvent::JobResult {
-            job_id: job_id_str,
-            status: payload
-                .data
-                .get("status")
-                .and_then(|v| v.as_str())
-                .unwrap_or("unknown")
-                .to_string(),
-            session_id: payload
-                .data
-                .get("session_id")
-                .and_then(|v| v.as_str())
-                .map(|s| s.to_string()),
-        },
+        "result" => {
+            // Signal the bridge's polling loop to exit by queueing a done prompt.
+            let mut queue = state.prompt_queue.lock().await;
+            queue.entry(job_id).or_default().push_back(PendingPrompt {
+                content: String::new(),
+                done: true,
+            });
+
+            SseEvent::JobResult {
+                job_id: job_id_str,
+                status: payload
+                    .data
+                    .get("status")
+                    .and_then(|v| v.as_str())
+                    .unwrap_or("unknown")
+                    .to_string(),
+                session_id: payload
+                    .data
+                    .get("session_id")
+                    .and_then(|v| v.as_str())
+                    .map(|s| s.to_string()),
+            }
+        }
         _ => SseEvent::JobStatus {
             job_id: job_id_str,
             message: payload
@@ -864,6 +873,54 @@ mod tests {
         let (_recv_id, event) = rx.recv().await.unwrap();
         // Unknown event types fall through to JobStatus
         assert!(matches!(event, SseEvent::JobStatus { .. }));
+    }
+
+    #[tokio::test]
+    async fn result_event_queues_done_prompt() {
+        let (tx, _rx) = broadcast::channel(16);
+        let token_store = TokenStore::new();
+        let jm = ContainerJobManager::new(ContainerJobConfig::default(), token_store.clone());
+        let prompt_queue = Arc::new(Mutex::new(HashMap::new()));
+        let state = OrchestratorState {
+            llm: Arc::new(StubLlm::default()),
+            job_manager: Arc::new(jm),
+            token_store: token_store.clone(),
+            job_event_tx: Some(tx),
+            prompt_queue: prompt_queue.clone(),
+            store: None,
+            secrets_store: None,
+            user_id: "default".to_string(),
+        };
+
+        let job_id = Uuid::new_v4();
+        let token = token_store.create_token(job_id).await;
+        let router = OrchestratorApi::router(state);
+
+        let payload = serde_json::json!({
+            "event_type": "result",
+            "data": {
+                "status": "completed",
+                "session_id": "test-session"
+            }
+        });
+
+        let req = Request::builder()
+            .method("POST")
+            .uri(format!("/worker/{}/event", job_id))
+            .header("Authorization", format!("Bearer {}", token))
+            .header("Content-Type", "application/json")
+            .body(Body::from(serde_json::to_vec(&payload).unwrap()))
+            .unwrap();
+
+        let resp = router.oneshot(req).await.unwrap();
+        assert_eq!(resp.status(), StatusCode::OK);
+
+        // Verify a done prompt was queued
+        let queue = prompt_queue.lock().await;
+        let prompts = queue.get(&job_id).expect("prompt queue should have entry for job");
+        assert_eq!(prompts.len(), 1);
+        assert!(prompts[0].done);
+        assert!(prompts[0].content.is_empty());
     }
 
     // -- Status update test --

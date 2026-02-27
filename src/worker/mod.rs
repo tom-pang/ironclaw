@@ -26,10 +26,12 @@
 
 pub mod api;
 pub mod claude_bridge;
+pub mod pi_bridge;
 pub mod proxy_llm;
 pub mod runtime;
 
 pub use api::WorkerHttpClient;
 pub use claude_bridge::ClaudeBridgeRuntime;
+pub use pi_bridge::PiBridgeRuntime;
 pub use proxy_llm::ProxyLlmProvider;
 pub use runtime::WorkerRuntime;

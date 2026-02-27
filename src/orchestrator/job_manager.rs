@@ -13,7 +13,26 @@ use uuid::Uuid;
 
 use crate::error::OrchestratorError;
 use crate::orchestrator::auth::{CredentialGrant, TokenStore};
+use crate::orchestrator::providers::{DetectedProvider, detect_providers, provider_env_key};
 use crate::sandbox::connect_docker;
+
+/// Per-job overrides for model, provider, and runtime parameters.
+///
+/// These allow callers to select a specific model or reasoning effort at job
+/// creation time instead of being locked to the process-level env-var defaults.
+/// Any `None` field falls back to the configured default.
+#[derive(Debug, Clone, Default)]
+pub struct RuntimeDispatchOverrides {
+    /// LLM provider override (e.g. "anthropic", "openai"). Pi-only.
+    pub provider: Option<String>,
+    /// Model override (e.g. "opus", "claude-sonnet-4-20250514").
+    pub model: Option<String>,
+    /// Maximum agentic turns override.
+    pub max_turns: Option<u32>,
+    /// Reasoning effort level (e.g. "low", "medium", "high"). Passed as
+    /// `--reasoning-effort` to Pi and `--reasoning-effort` to Claude Code.
+    pub reasoning_effort: Option<String>,
+}
 
 /// Which mode a sandbox container runs in.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -22,6 +41,8 @@ pub enum JobMode {
     Worker,
     /// Claude Code bridge that spawns the `claude` CLI directly.
     ClaudeCode,
+    /// Pi coding agent bridge that spawns the `pi` CLI directly.
+    PiCode,
 }
 
 impl JobMode {
@@ -29,6 +50,7 @@ impl JobMode {
         match self {
             Self::Worker => "worker",
             Self::ClaudeCode => "claude_code",
+            Self::PiCode => "pi_code",
         }
     }
 }
@@ -65,6 +87,16 @@ pub struct ContainerJobConfig {
     pub claude_code_memory_limit_mb: u64,
     /// Allowed tool patterns for Claude Code (passed as CLAUDE_CODE_ALLOWED_TOOLS env var).
     pub claude_code_allowed_tools: Vec<String>,
+    /// LLM provider for Pi containers (e.g. "anthropic", "openai").
+    pub pi_code_provider: String,
+    /// Model ID for Pi containers (e.g. "claude-sonnet-4-20250514").
+    pub pi_code_model: String,
+    /// Maximum turns for Pi coding agent.
+    pub pi_code_max_turns: u32,
+    /// Memory limit in MB for Pi containers.
+    pub pi_code_memory_limit_mb: u64,
+    /// Allowed tool names for Pi (passed as PI_CODE_ALLOWED_TOOLS env var).
+    pub pi_code_allowed_tools: Vec<String>,
 }
 
 impl Default for ContainerJobConfig {
@@ -80,6 +112,11 @@ impl Default for ContainerJobConfig {
             claude_code_max_turns: 50,
             claude_code_memory_limit_mb: 4096,
             claude_code_allowed_tools: crate::config::ClaudeCodeConfig::default().allowed_tools,
+            pi_code_provider: crate::config::PiCodeConfig::default().provider,
+            pi_code_model: crate::config::PiCodeConfig::default().model,
+            pi_code_max_turns: 50,
+            pi_code_memory_limit_mb: 4096,
+            pi_code_allowed_tools: crate::config::PiCodeConfig::default().allowed_tools,
         }
     }
 }
@@ -202,6 +239,29 @@ fn validate_bind_mount_path(
     Ok(canonical)
 }
 
+/// Summary of a single sandbox runtime mode's configuration.
+#[derive(Debug, Clone, serde::Serialize)]
+pub struct RuntimeModeInfo {
+    /// The configured default model for this runtime.
+    pub default_model: String,
+    /// The configured default provider for this runtime.
+    pub default_provider: String,
+    pub max_turns: u32,
+    /// Providers detected as available (have API keys set on the host).
+    /// The agent can dispatch jobs to any of these by setting `provider`
+    /// and `model` on `create_job`.
+    pub available_providers: Vec<DetectedProvider>,
+}
+
+/// Summary of all sandbox runtime configuration, returned by
+/// [`ContainerJobManager::runtime_info`].
+#[derive(Debug, Clone, serde::Serialize)]
+pub struct SandboxRuntimeInfo {
+    pub sandbox_image: String,
+    pub claude_code: RuntimeModeInfo,
+    pub pi_code: RuntimeModeInfo,
+}
+
 /// Manages the lifecycle of Docker containers for sandboxed job execution.
 pub struct ContainerJobManager {
     config: ContainerJobConfig,
@@ -218,6 +278,43 @@ impl ContainerJobManager {
             token_store,
             containers: Arc::new(RwLock::new(HashMap::new())),
             docker: Arc::new(RwLock::new(None)),
+        }
+    }
+
+    /// Return the configured sandbox runtime information for introspection.
+    ///
+    /// For Pi, available providers are auto-detected by probing which API-key
+    /// env vars are set on the host.
+    pub fn runtime_info(&self) -> SandboxRuntimeInfo {
+        // Claude Code: only anthropic, detected from credentials.
+        let claude_has_creds = self.config.claude_code_api_key.is_some()
+            || self.config.claude_code_oauth_token.is_some();
+        let claude_providers = if claude_has_creds {
+            vec![DetectedProvider {
+                provider: "anthropic".to_string(),
+                is_default: true,
+            }]
+        } else {
+            Vec::new()
+        };
+
+        // Pi: auto-detect from host env vars.
+        let pi_providers = detect_providers(&self.config.pi_code_provider);
+
+        SandboxRuntimeInfo {
+            sandbox_image: self.config.image.clone(),
+            claude_code: RuntimeModeInfo {
+                default_model: self.config.claude_code_model.clone(),
+                default_provider: "anthropic".to_string(),
+                max_turns: self.config.claude_code_max_turns,
+                available_providers: claude_providers,
+            },
+            pi_code: RuntimeModeInfo {
+                default_model: self.config.pi_code_model.clone(),
+                default_provider: self.config.pi_code_provider.clone(),
+                max_turns: self.config.pi_code_max_turns,
+                available_providers: pi_providers,
+            },
         }
     }
 
@@ -243,6 +340,8 @@ impl ContainerJobManager {
     /// The caller provides the `job_id` so it can be persisted to the database
     /// before the container is created. Credential grants are stored in the
     /// TokenStore and served on-demand via the `/credentials` endpoint.
+    /// `overrides` allows per-job model/provider/max_turns/reasoning_effort
+    /// selection at runtime, falling back to configured defaults for any `None` field.
     /// Returns the auth token for the worker.
     pub async fn create_job(
         &self,
@@ -251,6 +350,7 @@ impl ContainerJobManager {
         project_dir: Option<PathBuf>,
         mode: JobMode,
         credential_grants: Vec<CredentialGrant>,
+        overrides: RuntimeDispatchOverrides,
     ) -> Result<String, OrchestratorError> {
         // Generate auth token (stored in TokenStore, never logged)
         let token = self.token_store.create_token(job_id).await;
@@ -278,7 +378,7 @@ impl ContainerJobManager {
         // Run the actual container creation. On any failure, revoke the token
         // and remove the handle so we don't leak resources.
         match self
-            .create_job_inner(job_id, &token, project_dir, mode)
+            .create_job_inner(job_id, &token, project_dir, mode, &overrides)
             .await
         {
             Ok(()) => Ok(token),
@@ -297,6 +397,7 @@ impl ContainerJobManager {
         token: &str,
         project_dir: Option<PathBuf>,
         mode: JobMode,
+        overrides: &RuntimeDispatchOverrides,
     ) -> Result<(), OrchestratorError> {
         // Connect to Docker (reuses cached connection)
         let docker = self.docker().await?;
@@ -347,9 +448,44 @@ impl ContainerJobManager {
             }
         }
 
-        // Memory limit: Claude Code gets more memory
+        // Pi Code mode: inject API key for the resolved provider.
+        //
+        // Pi reads standard env vars per provider (ANTHROPIC_API_KEY,
+        // OPENAI_API_KEY, etc.). We inject whichever key matches the
+        // resolved provider (override or config default). The bridge also
+        // receives the allowed tools list for `--tools` restriction.
+        if mode == JobMode::PiCode {
+            // Resolve provider: per-job override takes priority
+            let resolved_provider = overrides
+                .provider
+                .as_deref()
+                .unwrap_or(&self.config.pi_code_provider);
+            // Inject API key based on resolved provider
+            let env_key = provider_env_key(resolved_provider).ok_or_else(|| {
+                OrchestratorError::ContainerCreationFailed {
+                    job_id,
+                    reason: format!(
+                        "Unknown PI_CODE_PROVIDER '{}'. \
+                         Supported: anthropic, openai, google, gemini, groq, xai",
+                        resolved_provider
+                    ),
+                }
+            })?;
+            if let Ok(key) = std::env::var(env_key) {
+                env_vec.push(format!("{env_key}={key}"));
+            }
+            if !self.config.pi_code_allowed_tools.is_empty() {
+                env_vec.push(format!(
+                    "PI_CODE_ALLOWED_TOOLS={}",
+                    self.config.pi_code_allowed_tools.join(",")
+                ));
+            }
+        }
+
+        // Memory limit: coding agents get more memory than standard workers
         let memory_mb = match mode {
             JobMode::ClaudeCode => self.config.claude_code_memory_limit_mb,
+            JobMode::PiCode => self.config.pi_code_memory_limit_mb,
             JobMode::Worker => self.config.memory_limit_mb,
         };
 
@@ -374,27 +510,66 @@ impl ContainerJobManager {
             ..Default::default()
         };
 
-        // Build CMD based on mode
-        let cmd = match mode {
+        // Resolve per-job overrides (fall back to config defaults).
+        let resolved_claude_model = overrides
+            .model
+            .as_deref()
+            .unwrap_or(&self.config.claude_code_model);
+        let resolved_claude_max_turns = overrides
+            .max_turns
+            .unwrap_or(self.config.claude_code_max_turns);
+        let resolved_pi_provider = overrides
+            .provider
+            .as_deref()
+            .unwrap_or(&self.config.pi_code_provider);
+        let resolved_pi_model = overrides
+            .model
+            .as_deref()
+            .unwrap_or(&self.config.pi_code_model);
+        let resolved_pi_max_turns = overrides.max_turns.unwrap_or(self.config.pi_code_max_turns);
+
+        // Build CMD based on mode, applying per-job overrides.
+        let mut cmd = match mode {
             JobMode::Worker => vec![
                 "worker".to_string(),
                 "--job-id".to_string(),
                 job_id.to_string(),
                 "--orchestrator-url".to_string(),
-                orchestrator_url,
+                orchestrator_url.clone(),
             ],
             JobMode::ClaudeCode => vec![
                 "claude-bridge".to_string(),
                 "--job-id".to_string(),
                 job_id.to_string(),
                 "--orchestrator-url".to_string(),
-                orchestrator_url,
+                orchestrator_url.clone(),
                 "--max-turns".to_string(),
-                self.config.claude_code_max_turns.to_string(),
+                resolved_claude_max_turns.to_string(),
                 "--model".to_string(),
-                self.config.claude_code_model.clone(),
+                resolved_claude_model.to_string(),
+            ],
+            JobMode::PiCode => vec![
+                "pi-bridge".to_string(),
+                "--job-id".to_string(),
+                job_id.to_string(),
+                "--orchestrator-url".to_string(),
+                orchestrator_url.clone(),
+                "--max-turns".to_string(),
+                resolved_pi_max_turns.to_string(),
+                "--provider".to_string(),
+                resolved_pi_provider.to_string(),
+                "--model".to_string(),
+                resolved_pi_model.to_string(),
             ],
         };
+
+        // Append --reasoning-effort if specified (supported by both bridges).
+        if let Some(ref effort) = overrides.reasoning_effort
+            && matches!(mode, JobMode::ClaudeCode | JobMode::PiCode)
+        {
+            cmd.push("--reasoning-effort".to_string());
+            cmd.push(effort.clone());
+        }
 
         let container_config = Config {
             image: Some(self.config.image.clone()),
@@ -409,6 +584,7 @@ impl ContainerJobManager {
         let container_name = match mode {
             JobMode::Worker => format!("ironclaw-worker-{}", job_id),
             JobMode::ClaudeCode => format!("ironclaw-claude-{}", job_id),
+            JobMode::PiCode => format!("ironclaw-pi-{}", job_id),
         };
         let options = CreateContainerOptions {
             name: container_name,

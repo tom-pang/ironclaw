@@ -4,28 +4,34 @@
   "kind": "channel",
   "version": "0.1.0",
   "description": "Telegram Bot API channel for receiving and responding to messages",
-  "keywords": ["messaging", "bot", "chat", "telegram"],
-
+  "keywords": [
+    "messaging",
+    "bot",
+    "chat",
+    "telegram"
+  ],
   "source": {
     "dir": "channels-src/telegram",
     "capabilities": "telegram.capabilities.json",
     "crate_name": "telegram-channel"
   },
-
   "artifacts": {
     "wasm32-wasip2": {
       "url": "https://github.com/nearai/ironclaw/releases/latest/download/telegram-wasm32-wasip2.tar.gz",
-      "sha256": null
+      "sha256": "b58233fda1bbe6045b3e7da1ea19d127a8d12dc75d1523746a977cfd651cb235"
     }
   },
-
   "auth_summary": {
     "method": "manual",
     "provider": "Telegram",
-    "secrets": ["telegram_bot_token"],
+    "secrets": [
+      "telegram_bot_token"
+    ],
     "shared_auth": null,
     "setup_url": "https://t.me/BotFather"
   },
-
-  "tags": ["default", "messaging"]
+  "tags": [
+    "default",
+    "messaging"
+  ]
 }

@@ -42,7 +42,7 @@ pub use self::llm::{
 };
 pub use self::routines::RoutineConfig;
 pub use self::safety::SafetyConfig;
-pub use self::sandbox::{ClaudeCodeConfig, SandboxModeConfig};
+pub use self::sandbox::{ClaudeCodeConfig, PiCodeConfig, SandboxModeConfig};
 pub use self::secrets::SecretsConfig;
 pub use self::skills::SkillsConfig;
 pub use self::tunnel::TunnelConfig;
@@ -73,6 +73,7 @@ pub struct Config {
     pub routines: RoutineConfig,
     pub sandbox: SandboxModeConfig,
     pub claude_code: ClaudeCodeConfig,
+    pub pi_code: PiCodeConfig,
     pub skills: SkillsConfig,
     pub observability: crate::observability::ObservabilityConfig,
 }
@@ -197,6 +198,7 @@ impl Config {
             routines: RoutineConfig::resolve()?,
             sandbox: SandboxModeConfig::resolve()?,
             claude_code: ClaudeCodeConfig::resolve()?,
+            pi_code: PiCodeConfig::resolve()?,
             skills: SkillsConfig::resolve()?,
             observability: crate::observability::ObservabilityConfig {
                 backend: std::env::var("OBSERVABILITY_BACKEND").unwrap_or_else(|_| "none".into()),

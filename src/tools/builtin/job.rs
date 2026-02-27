@@ -20,7 +20,7 @@ use crate::context::{ContextManager, JobContext, JobState};
 use crate::db::Database;
 use crate::history::SandboxJobRecord;
 use crate::orchestrator::auth::CredentialGrant;
-use crate::orchestrator::job_manager::{ContainerJobManager, JobMode};
+use crate::orchestrator::job_manager::{ContainerJobManager, JobMode, RuntimeDispatchOverrides};
 use crate::secrets::SecretsStore;
 use crate::tools::tool::{ApprovalRequirement, Tool, ToolError, ToolOutput, require_str};
 
@@ -270,6 +270,7 @@ impl CreateJobTool {
     }
 
     /// Execute via sandboxed Docker container.
+    #[allow(clippy::too_many_arguments)]
     async fn execute_sandbox(
         &self,
         task: &str,
@@ -277,6 +278,7 @@ impl CreateJobTool {
         wait: bool,
         mode: JobMode,
         credential_grants: Vec<CredentialGrant>,
+        overrides: RuntimeDispatchOverrides,
         ctx: &JobContext,
     ) -> Result<ToolOutput, ToolError> {
         let start = std::time::Instant::now();
@@ -316,15 +318,13 @@ impl CreateJobTool {
         });
 
         // Persist the job mode to DB
-        if mode == JobMode::ClaudeCode
+        if matches!(mode, JobMode::ClaudeCode | JobMode::PiCode)
             && let Some(store) = self.store.clone()
         {
             let job_id_copy = job_id;
+            let mode_str = mode.as_str().to_string();
             tokio::spawn(async move {
-                if let Err(e) = store
-                    .update_sandbox_job_mode(job_id_copy, "claude_code")
-                    .await
-                {
+                if let Err(e) = store.update_sandbox_job_mode(job_id_copy, &mode_str).await {
                     tracing::warn!(job_id = %job_id_copy, "Failed to set job mode: {}", e);
                 }
             });
@@ -332,7 +332,14 @@ impl CreateJobTool {
 
         // Create the container job with the pre-determined job_id.
         let _token = jm
-            .create_job(job_id, task, Some(project_dir), mode, credential_grants)
+            .create_job(
+                job_id,
+                task,
+                Some(project_dir),
+                mode,
+                credential_grants,
+                overrides,
+            )
             .await
             .map_err(|e| {
                 self.update_status(
@@ -642,7 +649,7 @@ impl Tool for CreateJobTool {
              whenever the user asks you to build, create, or work on something. The task \
              description should be detailed enough for the sub-agent to work independently. \
              Set wait=false to start immediately while continuing the conversation. Set mode \
-             to 'claude_code' for complex software engineering tasks."
+             to 'claude_code' or 'pi_code' for complex software engineering tasks."
         } else {
             "Create a new job or task for the agent to work on. Use this when the user wants \
              you to do something substantial that should be tracked as a separate job."
@@ -669,9 +676,10 @@ impl Tool for CreateJobTool {
                     },
                     "mode": {
                         "type": "string",
-                        "enum": ["worker", "claude_code"],
+                        "enum": ["worker", "claude_code", "pi_code"],
                         "description": "Execution mode. 'worker' (default) uses the IronClaw sub-agent. \
-                                        'claude_code' uses Claude Code CLI for full agentic software engineering."
+                                        'claude_code' uses Claude Code CLI for full agentic software engineering. \
+                                        'pi_code' uses the Pi coding agent CLI."
                     },
                     "project_dir": {
                         "type": "string",
@@ -684,6 +692,32 @@ impl Tool for CreateJobTool {
                                         secrets store (via 'ironclaw tool auth' or web UI). Example: \
                                         {\"github_token\": \"GITHUB_TOKEN\", \"npm_token\": \"NPM_TOKEN\"}",
                         "additionalProperties": { "type": "string" }
+                    },
+                    "model": {
+                        "type": "string",
+                        "description": "Override the LLM model for this job. For claude_code mode: \
+                                        'sonnet', 'opus', etc. For pi_code mode: full model ID like \
+                                        'claude-sonnet-4-20250514'. Falls back to configured default."
+                    },
+                    "provider": {
+                        "type": "string",
+                        "description": "Override the LLM provider for this job (pi_code mode only). \
+                                        Supported: 'anthropic', 'openai', 'google', 'groq', 'xai'. \
+                                        Falls back to configured default.",
+                        "enum": ["anthropic", "openai", "google", "groq", "xai"]
+                    },
+                    "max_turns": {
+                        "type": "integer",
+                        "description": "Override the maximum agentic turns for this job. \
+                                        Falls back to configured default (typically 50).",
+                        "minimum": 1,
+                        "maximum": 500
+                    },
+                    "reasoning_effort": {
+                        "type": "string",
+                        "description": "Reasoning effort level for the LLM. Controls depth of thinking. \
+                                        Supported values: 'low', 'medium', 'high'.",
+                        "enum": ["low", "medium", "high"]
                     }
                 },
                 "required": ["title", "description"]
@@ -733,6 +767,7 @@ impl Tool for CreateJobTool {
 
             let mode = match params.get("mode").and_then(|v| v.as_str()) {
                 Some("claude_code") => JobMode::ClaudeCode,
+                Some("pi_code") => JobMode::PiCode,
                 _ => JobMode::Worker,
             };
 
@@ -744,10 +779,38 @@ impl Tool for CreateJobTool {
             // Parse and validate credential grants
             let credential_grants = self.parse_credentials(&params, &ctx.user_id).await?;
 
+            // Parse per-job runtime dispatch overrides
+            let overrides = RuntimeDispatchOverrides {
+                provider: params
+                    .get("provider")
+                    .and_then(|v| v.as_str())
+                    .map(String::from),
+                model: params
+                    .get("model")
+                    .and_then(|v| v.as_str())
+                    .map(String::from),
+                max_turns: params
+                    .get("max_turns")
+                    .and_then(|v| v.as_u64())
+                    .map(|v| v as u32),
+                reasoning_effort: params
+                    .get("reasoning_effort")
+                    .and_then(|v| v.as_str())
+                    .map(String::from),
+            };
+
             // Combine title and description into the task prompt for the sub-agent.
             let task = format!("{}\n\n{}", title, description);
-            self.execute_sandbox(&task, explicit_dir, wait, mode, credential_grants, ctx)
-                .await
+            self.execute_sandbox(
+                &task,
+                explicit_dir,
+                wait,
+                mode,
+                credential_grants,
+                overrides,
+                ctx,
+            )
+            .await
         } else {
             self.execute_local(title, description, ctx).await
         }
@@ -1274,6 +1337,58 @@ impl Tool for JobPromptTool {
 
     fn requires_approval(&self, _params: &serde_json::Value) -> ApprovalRequirement {
         ApprovalRequirement::UnlessAutoApproved
+    }
+
+    fn requires_sanitization(&self) -> bool {
+        false
+    }
+}
+
+/// Tool that exposes configured sandbox runtime information (models, providers,
+/// defaults) so the agent can make informed decisions when dispatching jobs.
+pub struct SandboxInfoTool {
+    job_manager: Arc<ContainerJobManager>,
+}
+
+impl SandboxInfoTool {
+    pub fn new(job_manager: Arc<ContainerJobManager>) -> Self {
+        Self { job_manager }
+    }
+}
+
+#[async_trait]
+impl Tool for SandboxInfoTool {
+    fn name(&self) -> &str {
+        "sandbox_info"
+    }
+
+    fn description(&self) -> &str {
+        "Show available sandbox execution runtimes, their configured default models, \
+         providers, and capabilities. Call this before create_job to discover which \
+         models and providers are available for sandbox jobs."
+    }
+
+    fn parameters_schema(&self) -> serde_json::Value {
+        serde_json::json!({
+            "type": "object",
+            "properties": {},
+            "required": []
+        })
+    }
+
+    async fn execute(
+        &self,
+        _params: serde_json::Value,
+        _ctx: &JobContext,
+    ) -> Result<ToolOutput, ToolError> {
+        let start = std::time::Instant::now();
+        let info = self.job_manager.runtime_info();
+
+        let output = serde_json::to_string_pretty(&info).map_err(|e| {
+            ToolError::ExecutionFailed(format!("failed to serialize runtime info: {e}"))
+        })?;
+
+        Ok(ToolOutput::text(output, start.elapsed()))
     }
 
     fn requires_sanitization(&self) -> bool {

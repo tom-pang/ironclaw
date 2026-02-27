@@ -157,6 +157,38 @@ pub enum Command {
         /// Claude model to use (e.g. "sonnet", "opus").
         #[arg(long, default_value = "sonnet")]
         model: String,
+
+        /// Reasoning effort level (e.g. "low", "medium", "high").
+        #[arg(long)]
+        reasoning_effort: Option<String>,
+    },
+
+    /// Run as a Pi coding agent bridge inside a Docker container (internal use).
+    /// Spawns the `pi` CLI and streams output back to the orchestrator.
+    PiBridge {
+        /// Job ID to execute.
+        #[arg(long)]
+        job_id: uuid::Uuid,
+
+        /// URL of the orchestrator's internal API.
+        #[arg(long, default_value = "http://host.docker.internal:50051")]
+        orchestrator_url: String,
+
+        /// Maximum agentic turns for the Pi agent.
+        #[arg(long, default_value = "50")]
+        max_turns: u32,
+
+        /// LLM provider (e.g. "anthropic", "openai").
+        #[arg(long, default_value = "anthropic")]
+        provider: String,
+
+        /// Model ID to use (e.g. "claude-sonnet-4-20250514").
+        #[arg(long, default_value = "claude-sonnet-4-20250514")]
+        model: String,
+
+        /// Reasoning effort level (e.g. "low", "medium", "high").
+        #[arg(long)]
+        reasoning_effort: Option<String>,
     },
 }
 

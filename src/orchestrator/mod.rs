@@ -31,6 +31,7 @@
 pub mod api;
 pub mod auth;
 pub mod job_manager;
+pub mod providers;
 
 pub use api::OrchestratorApi;
 pub use auth::{CredentialGrant, TokenStore};

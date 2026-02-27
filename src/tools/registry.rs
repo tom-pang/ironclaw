@@ -18,9 +18,9 @@ use crate::tools::builder::{BuildSoftwareTool, BuilderConfig, LlmSoftwareBuilder
 use crate::tools::builtin::{
     ApplyPatchTool, CancelJobTool, CreateJobTool, EchoTool, HttpTool, JobEventsTool, JobPromptTool,
     JobStatusTool, JsonTool, ListDirTool, ListJobsTool, MemoryReadTool, MemorySearchTool,
-    MemoryTreeTool, MemoryWriteTool, PromptQueue, ReadFileTool, ShellTool, SkillInstallTool,
-    SkillListTool, SkillRemoveTool, SkillSearchTool, TimeTool, ToolActivateTool, ToolAuthTool,
-    ToolInstallTool, ToolListTool, ToolRemoveTool, ToolSearchTool, WriteFileTool,
+    MemoryTreeTool, MemoryWriteTool, PromptQueue, ReadFileTool, SandboxInfoTool, ShellTool,
+    SkillInstallTool, SkillListTool, SkillRemoveTool, SkillSearchTool, TimeTool, ToolActivateTool,
+    ToolAuthTool, ToolInstallTool, ToolListTool, ToolRemoveTool, ToolSearchTool, WriteFileTool,
 };
 use crate::tools::rate_limiter::RateLimiter;
 use crate::tools::tool::{Tool, ToolDomain};
@@ -51,6 +51,7 @@ const PROTECTED_TOOL_NAMES: &[&str] = &[
     "list_jobs",
     "job_status",
     "cancel_job",
+    "sandbox_info",
     "build_software",
     "tool_search",
     "tool_install",
@@ -297,8 +298,8 @@ impl ToolRegistry {
         secrets_store: Option<Arc<dyn SecretsStore + Send + Sync>>,
     ) {
         let mut create_tool = CreateJobTool::new(Arc::clone(&context_manager));
-        if let Some(jm) = job_manager {
-            create_tool = create_tool.with_sandbox(jm, store.clone());
+        if let Some(ref jm) = job_manager {
+            create_tool = create_tool.with_sandbox(Arc::clone(jm), store.clone());
         }
         if let (Some(etx), Some(itx)) = (job_event_tx, inject_tx) {
             create_tool = create_tool.with_monitor_deps(etx, itx);
@@ -313,6 +314,12 @@ impl ToolRegistry {
 
         // Base tools: create, list, status, cancel
         let mut job_tool_count = 4;
+
+        // Register sandbox info tool if job manager is available
+        if let Some(ref jm) = job_manager {
+            self.register_sync(Arc::new(SandboxInfoTool::new(Arc::clone(jm))));
+            job_tool_count += 1;
+        }
 
         // Register event reader if store is available
         if let Some(store) = store {

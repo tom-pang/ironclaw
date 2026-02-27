@@ -223,6 +223,23 @@ impl near::agent::channel_host::Host for ChannelStoreData {
             "WASM http_request called"
         );
 
+        // Parse raw headers before any credential injection
+        let raw_headers: std::collections::HashMap<String, String> =
+            serde_json::from_str(&headers_json).unwrap_or_default();
+
+        // Leak scan on PRE-injection values (what WASM actually sent).
+        // Credential injection happens after this, so host-injected secrets
+        // (e.g. Bearer tokens) won't trigger false positives.
+        let leak_detector = LeakDetector::new();
+        let raw_header_vec: Vec<(String, String)> = raw_headers
+            .iter()
+            .map(|(k, v)| (k.clone(), v.clone()))
+            .collect();
+
+        leak_detector
+            .scan_http_request(&url, &raw_header_vec, body.as_deref())
+            .map_err(|e| format!("Potential secret leak blocked: {}", e))?;
+
         // Inject credentials into URL (e.g., replace {TELEGRAM_BOT_TOKEN} with actual token)
         let injected_url = self.inject_credentials(&url, "url");
 
@@ -244,11 +261,8 @@ impl near::agent::channel_host::Host for ChannelStoreData {
             format!("Rate limit exceeded: {}", e)
         })?;
 
-        // Parse headers and inject credentials into header values
+        // Inject credentials into header values
         // This allows patterns like "Authorization": "Bearer {WHATSAPP_ACCESS_TOKEN}"
-        let raw_headers: std::collections::HashMap<String, String> =
-            serde_json::from_str(&headers_json).unwrap_or_default();
-
         let headers: std::collections::HashMap<String, String> = raw_headers
             .into_iter()
             .map(|(k, v)| {
@@ -269,15 +283,6 @@ impl near::agent::channel_host::Host for ChannelStoreData {
         );
 
         let url = injected_url;
-        let leak_detector = LeakDetector::new();
-        let header_vec: Vec<(String, String)> = headers
-            .iter()
-            .map(|(k, v)| (k.clone(), v.clone()))
-            .collect();
-
-        leak_detector
-            .scan_http_request(&url, &header_vec, body.as_deref())
-            .map_err(|e| format!("Potential secret leak blocked: {}", e))?;
 
         // Get the max response size from capabilities (default 10MB).
         let max_response_bytes = self

@@ -264,8 +264,8 @@ jobs:
           set -euo pipefail
           mkdir -p target/wasm-bundles
 
-          # Process each manifest in registry/tools/ and registry/channels/
-          for manifest in registry/tools/*.json registry/channels/*.json; do
+          # Only build the Slack channel WASM extension (the only one fin needs)
+          for manifest in registry/channels/slack.json; do
             [ -f "$manifest" ] || continue
 
             name=$(jq -r '.name' "$manifest")

@@ -205,19 +205,13 @@ allow-dirty = ["ci"]
 # CI backends to support
 ci = "github"
 # The installers to generate for each app
-installers = ["shell", "powershell", "npm", "msi"]
+installers = ["shell"]
 # Publish jobs to run in CI
 publish-jobs = []
 # Target platforms to build apps for (Rust target-triple syntax)
 targets = [
-    "aarch64-apple-darwin",
-    "aarch64-unknown-linux-gnu",
-    "x86_64-apple-darwin",
     "x86_64-unknown-linux-gnu",
-    "x86_64-pc-windows-msvc",
 ]
-# The archive format to use for windows builds (defaults .zip)
-windows-archive = ".tar.gz"
 # The archive format to use for non-windows builds (defaults .tar.xz)
 unix-archive = ".tar.gz"
 # Which actions to run on pull requests
@@ -230,8 +224,4 @@ install-updater = true
 cache-builds = true
 
 [workspace.metadata.dist.github-custom-runners]
-aarch64-unknown-linux-gnu = "ubuntu-24.04-arm"
 x86_64-unknown-linux-gnu = "ubuntu-22.04"
-x86_64-pc-windows-msvc = "windows-2022"
-x86_64-apple-darwin = "macos-15-intel"
-aarch64-apple-darwin = "macos-14"
